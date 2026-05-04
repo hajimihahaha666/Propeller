@@ -200,6 +200,16 @@
           <WinNumber>1</WinNumber>
           <ItemText>spi_mode_index</ItemText>
         </Ww>
+        <Ww>
+          <count>10</count>
+          <WinNumber>1</WinNumber>
+          <ItemText>\\pai_stm32f103c8t6\../My_Core/App.c\debug_esc_throttles</ItemText>
+        </Ww>
+        <Ww>
+          <count>11</count>
+          <WinNumber>1</WinNumber>
+          <ItemText>\\pai_stm32f103c8t6\../My_Core/App.c\debug_esc_throttles</ItemText>
+        </Ww>
       </WatchWindow1>
       <Tracepoint>
         <THDelay>0</THDelay>
