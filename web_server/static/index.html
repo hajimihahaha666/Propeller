@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>水下机器人控制系统</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #38bdf8;
+      --primary-hover: #0ea5e9;
+      --success: #22c55e;
+      --danger: #ef4444;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 10px; overflow-x: hidden; touch-action: manipulation;}
+    .container { max-width: 1200px; margin: 0 auto; display: grid; gap: 15px; grid-template-columns: 1fr; }
+    @media(min-width: 900px) { .container { grid-template-columns: 350px 1fr; } }
+    .card { background: var(--card-bg); border-radius: 12px; padding: 15px; border: 1px solid var(--border); }
+    h2 { font-size: 1.1rem; margin-bottom: 12px; color: var(--primary); display: flex; align-items: center; gap: 8px; }
+    .status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--danger); }
+    .status-dot.online { background: var(--success); }
+    
+    /* IMU Info */
+    .metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px; }
+    .metric { background: rgba(0,0,0,0.2); padding: 8px; border-radius: 8px; text-align: center; }
+    .metric .label { font-size: 0.75rem; color: var(--text-muted); }
+    .metric .value { font-size: 1rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+    
+    /* Zero Control */
+    .zero-group { display: flex; gap: 10px; margin-bottom: 10px; }
+    .btn { flex: 1; padding: 8px; border: none; border-radius: 6px; background: var(--border); color: var(--text); font-weight: 500; cursor: pointer; transition: 0.2s; }
+    .btn.active { background: var(--primary); color: #000; }
+    .btn:hover:not(:disabled) { filter: brightness(1.2); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-set { background: var(--success); color: #000; flex: 0.5; }
+    
+    /* Control Layout */
+    .controls { display: grid; grid-template-columns: 1fr; gap: 15px; }
+    @media(min-width: 600px) { .controls { grid-template-columns: 1fr 1fr; } }
+    .pad-container { position: relative; height: 250px; background: rgba(0,0,0,0.2); border-radius: 12px; border: 1px solid var(--border); display: flex; align-items: center; justify-content: center;}
+    .joystick-zone { width: 100%; height: 100%; position: absolute; top:0; left:0; }
+    .slider-container { position: absolute; right: 10px; top: 10px; bottom: 10px; width: 40px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+    input[type=range][orient=vertical] { writing-mode: bt-lr; -webkit-appearance: slider-vertical; width: 8px; height: 100%; padding: 0 5px; }
+    
+    .speed-panel { display: flex; flex-direction: column; gap: 8px; }
+    .speed-btns { display: flex; gap: 5px; }
+    .speed-btn { flex: 1; padding: 10px; border: 1px solid var(--primary); background: transparent; color: var(--primary); border-radius: 6px; cursor: pointer; }
+    .speed-btn.active { background: var(--primary); color: #000; }
+    .info-text { font-size: 0.85rem; color: var(--text-muted); text-align: center; margin-top: 5px; }
+    
+    #scene-wrap { width: 100%; height: 200px; border-radius: 12px; overflow: hidden; background: #000; position: relative; }
+    
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/nipplejs/0.10.1/nipplejs.min.js"></script>
+</head>
+<body>
+
+<div class="container">
+  <!-- 左侧信息栏 -->
+  <div class="left-col">
+    <div class="card" style="margin-bottom: 15px;">
+      <h2><div class="status-dot" id="status-dot"></div> <span id="status-text">连接中...</span></h2>
+      <div id="scene-wrap">
+        <canvas id="scene"></canvas>
+      </div>
+      
+      <h3 style="font-size: 0.9rem; margin: 15px 0 8px; color: var(--text-muted);">姿态角 (°)</h3>
+      <div class="metric-grid">
+        <div class="metric"><div class="label">Roll (X)</div><div class="value" id="roll">0.000</div></div>
+        <div class="metric"><div class="label">Pitch (Y)</div><div class="value" id="pitch">0.000</div></div>
+        <div class="metric"><div class="label">Yaw (Z)</div><div class="value" id="yaw">0.000</div></div>
+      </div>
+      
+      <h3 style="font-size: 0.9rem; margin: 15px 0 8px; color: var(--text-muted);">多零位控制</h3>
+      <div class="zero-group" id="zero-select-group">
+        <button class="btn active" data-prof="A">零位 A</button>
+        <button class="btn" data-prof="B">零位 B</button>
+        <button class="btn" data-prof="C">零位 C</button>
+      </div>
+      <button class="btn btn-set" id="btn-set-zero" style="width: 100%;">将当前实际姿态记录为选中零位</button>
+    </div>
+  </div>
+
+  <!-- 右侧控制栏 -->
+  <div class="right-col">
+    <div class="card controls">
+      
+      <!-- 姿态控制 -->
+      <div class="control-group">
+        <h2>姿态控制 (顶部6推进器)</h2>
+        <div class="pad-container">
+          <div class="joystick-zone" id="pad-attitude"></div>
+          <div class="slider-container">
+            <input type="range" id="heave-slider" orient="vertical" min="-1" max="1" step="0.05" value="0">
+            <span style="font-size: 0.7rem; color: #888; margin-top:5px;">上下</span>
+          </div>
+        </div>
+        <div class="info-text">摇杆：俯仰/横滚 | 滑块：上浮/下潜</div>
+      </div>
+
+      <!-- 运动控制 -->
+      <div class="control-group">
+        <h2>前进后退 (尾部2推进器)</h2>
+        <div class="pad-container">
+          <div class="joystick-zone" id="pad-movement"></div>
+        </div>
+        <div class="info-text">摇杆：前进后退 / 左右转向</div>
+      </div>
+      
+      <!-- 速度控制 -->
+      <div class="card" style="grid-column: 1 / -1;">
+        <h2>全局速度限制</h2>
+        <div class="speed-btns" id="speed-group">
+          <button class="speed-btn" data-speed="slow">慢速 (25%)</button>
+          <button class="speed-btn active" data-speed="medium">中速 (50%)</button>
+          <button class="speed-btn" data-speed="fast">快速 (80%)</button>
+        </div>
+        <div style="margin-top: 10px; display:flex; justify-content: space-around; color: var(--primary);">
+          <div>当前目标速度: <span id="val-speed-text">中速 (50%)</span></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+    }
+  }
+</script>
+
+<script type="module">
+  import * as THREE from "three";
+
+  const statusDot = document.getElementById("status-dot");
+  const statusText = document.getElementById("status-text");
+  
+  // THREE.JS
+  const canvas = document.getElementById("scene");
+  const wrap = document.getElementById("scene-wrap");
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(wrap.clientWidth, wrap.clientHeight, false);
+  
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(45, wrap.clientWidth / wrap.clientHeight, 0.1, 100);
+  camera.position.set(2.8, 2.2, 3.2);
+  camera.lookAt(0, 0, 0);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.65));
+  const keyLight = new THREE.DirectionalLight(0xffffff, 1.1);
+  keyLight.position.set(4, 6, 5);
+  scene.add(keyLight);
+  const grid = new THREE.GridHelper(4, 20, 0x334155, 0x1e293b);
+  grid.position.y = -0.8;
+  scene.add(grid);
+
+  const robot = new THREE.Group();
+  let smoothRoll = 0, smoothPitch = 0, smoothYaw = 0;
+  const POSE_SMOOTH = 0.12;
+
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(1.4, 0.45, 0.9),
+    new THREE.MeshStandardMaterial({ color: 0x38bdf8, metalness: 0.35, roughness: 0.4 })
+  );
+  robot.add(body);
+  const head = new THREE.Mesh(
+    new THREE.BoxGeometry(0.55, 0.35, 0.55),
+    new THREE.MeshStandardMaterial({ color: 0x22c55e, metalness: 0.25, roughness: 0.45 })
+  );
+  head.position.set(0.55, 0.35, 0);
+  robot.add(head);
+  scene.add(robot);
+
+  function resize() {
+    const w = wrap.clientWidth;
+    const h = wrap.clientHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h, false);
+  }
+  window.addEventListener("resize", resize);
+  
+  function renderLoop() {
+    requestAnimationFrame(renderLoop);
+    const rollRad = THREE.MathUtils.degToRad(smoothRoll);
+    const pitchRad = THREE.MathUtils.degToRad(smoothPitch);
+    const yawRad = THREE.MathUtils.degToRad(smoothYaw);
+    robot.rotation.set(pitchRad, yawRad, rollRad, "ZYX");
+    renderer.render(scene, camera);
+  }
+  renderLoop();
+
+  // IMU Data
+  const ids = ["roll", "pitch", "yaw"];
+  const displayValues = { roll: 0, pitch: 0, yaw: 0 };
+  let currentProfile = "A";
+  
+  function applyData(data) {
+    if (data.connected) {
+      statusDot.classList.add("online");
+      statusText.textContent = `系统在线 (当前零位: ${data.active_zero_profile})`;
+    } else {
+      statusDot.classList.remove("online");
+      statusText.textContent = "IMU断开连接";
+    }
+    
+    currentProfile = data.active_zero_profile;
+    document.querySelectorAll('#zero-select-group .btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.prof === currentProfile);
+    });
+
+    ids.forEach(id => {
+      let val = Number(data[id] ?? 0);
+      displayValues[id] += (val - displayValues[id]) * 0.25;
+      document.getElementById(id).textContent = val.toFixed(3);
+    });
+    
+    smoothRoll += (displayValues.roll - smoothRoll) * POSE_SMOOTH;
+    smoothPitch += (displayValues.pitch - smoothPitch) * POSE_SMOOTH;
+    smoothYaw += (displayValues.yaw - smoothYaw) * POSE_SMOOTH;
+  }
+
+  function connectStream() {
+    const source = new EventSource("/stream");
+    source.onmessage = (e) => {
+      try { applyData(JSON.parse(e.data)); } catch(err){}
+    };
+    source.onerror = () => {
+      statusDot.classList.remove("online");
+      statusText.textContent = "服务器断开，重连中...";
+      source.close();
+      setTimeout(connectStream, 1500);
+    };
+  }
+  connectStream();
+
+  // Zero Control
+  document.querySelectorAll('#zero-select-group .btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      fetch('/api/zero/use', {
+        method: 'POST', body: JSON.stringify({ profile: btn.dataset.prof })
+      });
+    });
+  });
+  document.getElementById('btn-set-zero').addEventListener('click', () => {
+    fetch('/api/zero/set', {
+      method: 'POST', body: JSON.stringify({ profile: currentProfile })
+    });
+  });
+
+  // Joystick & Control
+  let ctrlState = { heave: 0, pitch: 0, roll: 0, surge: 0, yaw: 0, speed_mode: 'medium' };
+  
+  function sendControl() {
+    fetch('/api/control', {
+      method: 'POST', body: JSON.stringify(ctrlState)
+    }).catch(e => {});
+  }
+  
+  // 50ms (20Hz) send loop
+  setInterval(sendControl, 50);
+
+  // Speed Mode
+  document.querySelectorAll('.speed-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      ctrlState.speed_mode = btn.dataset.speed;
+      document.getElementById('val-speed-text').textContent = btn.textContent;
+    });
+  });
+
+  // Heave Slider
+  const heaveSlider = document.getElementById('heave-slider');
+  heaveSlider.addEventListener('input', (e) => {
+    ctrlState.heave = parseFloat(e.target.value);
+  });
+  // Reset heave on release
+  heaveSlider.addEventListener('change', (e) => {
+    e.target.value = 0;
+    ctrlState.heave = 0;
+  });
+  heaveSlider.addEventListener('touchend', (e) => {
+    e.target.value = 0;
+    ctrlState.heave = 0;
+  });
+
+  // NippleJS Joysticks
+  const padAtt = nipplejs.create({
+    zone: document.getElementById('pad-attitude'),
+    mode: 'static', position: { left: '50%', top: '50%' }, color: '#38bdf8'
+  });
+  padAtt.on('move', (evt, data) => {
+    // Math.sin/cos for normalized X/Y
+    ctrlState.roll = data.distance / 50.0 * Math.cos(data.angle.radian);
+    ctrlState.pitch = data.distance / 50.0 * Math.sin(data.angle.radian);
+  });
+  padAtt.on('end', () => { ctrlState.roll = 0; ctrlState.pitch = 0; });
+
+  const padMov = nipplejs.create({
+    zone: document.getElementById('pad-movement'),
+    mode: 'static', position: { left: '50%', top: '50%' }, color: '#22c55e'
+  });
+  padMov.on('move', (evt, data) => {
+    ctrlState.yaw = data.distance / 50.0 * Math.cos(data.angle.radian);
+    ctrlState.surge = data.distance / 50.0 * Math.sin(data.angle.radian);
+  });
+  padMov.on('end', () => { ctrlState.surge = 0; ctrlState.yaw = 0; });
+
+</script>
+</body>
+</html>

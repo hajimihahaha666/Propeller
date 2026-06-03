@@ -1,0 +1,20 @@
+# ROS2 编译产物
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 编辑器与系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 旧版重复文件
+/imu_serial_node.c
