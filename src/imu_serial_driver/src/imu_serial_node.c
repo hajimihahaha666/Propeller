@@ -33,6 +33,8 @@
 #define FRAME_TYPE_ACC 0x51
 #define FRAME_TYPE_GYRO 0x52
 #define FRAME_TYPE_ANGLE 0x53
+#define GRAVITY_MS2 9.80665f
+#define STARTUP_CALIB_SAMPLES 200
 
 rcl_node_t node;
 rcl_publisher_t imu_pub;
@@ -78,7 +80,18 @@ static bool data_updated = false;
 static imu_filter_t imu_filter;
 static imu_position_t imu_position;
 
+static bool startup_calibrated = false;
+static int startup_calib_count = 0;
+static double startup_sum_ax = 0.0;
+static double startup_sum_ay = 0.0;
+static double startup_sum_az = 0.0;
+static double startup_sum_gx = 0.0;
+static double startup_sum_gy = 0.0;
+static double startup_sum_gz = 0.0;
+static float yaw_zero_offset = 0.0f;
+
 void imu_zero_calibration(void);
+static void reset_position(void);
 
 static float apply_axis_zero(float value, float offset)
 {
@@ -201,14 +214,57 @@ static void get_zeroed_values(
     *yaw = apply_angle_zero(raw_yaw, angle_offset_yaw);
 }
 
+static void collect_startup_calibration_sample(void)
+{
+    if (startup_calibrated) {
+        return;
+    }
+
+    startup_sum_ax += raw_ax;
+    startup_sum_ay += raw_ay;
+    startup_sum_az += raw_az;
+    startup_sum_gx += raw_gx;
+    startup_sum_gy += raw_gy;
+    startup_sum_gz += raw_gz;
+    startup_calib_count++;
+
+    if (startup_calib_count < STARTUP_CALIB_SAMPLES) {
+        return;
+    }
+
+    const float inv = 1.0f / (float)STARTUP_CALIB_SAMPLES;
+    acc_offset_x = (float)startup_sum_ax * inv;
+    acc_offset_y = (float)startup_sum_ay * inv;
+    acc_offset_z = (float)startup_sum_az * inv - GRAVITY_MS2;
+    gyro_offset_x = (float)startup_sum_gx * inv;
+    gyro_offset_y = (float)startup_sum_gy * inv;
+    gyro_offset_z = (float)startup_sum_gz * inv;
+    yaw_zero_offset = 0.0f;
+
+    imu_filter_reset(&imu_filter);
+    reset_position();
+    startup_calibrated = true;
+
+    printf("[INFO] IMU Mahony 启动校准完成 (%d 样本)\n", STARTUP_CALIB_SAMPLES);
+    printf("       陀螺零偏 gx=%.4f gy=%.4f gz=%.4f rad/s\n",
+           gyro_offset_x, gyro_offset_y, gyro_offset_z);
+}
+
 static imu_sample_t get_filtered_values(int64_t now_ns)
 {
     imu_sample_t input;
+    float unused_roll = 0.0f;
+    float unused_pitch = 0.0f;
+    float unused_yaw = 0.0f;
+
     get_zeroed_values(
         &input.ax, &input.ay, &input.az,
         &input.gx, &input.gy, &input.gz,
-        &input.roll, &input.pitch, &input.yaw);
-    return imu_filter_update(&imu_filter, &input, now_ns);
+        &unused_roll, &unused_pitch, &unused_yaw);
+
+    imu_sample_t output = imu_filter_update(&imu_filter, &input, now_ns);
+    output.yaw = apply_angle_zero(output.yaw, yaw_zero_offset);
+    return output;
 }
 
 static void reset_position(void)
@@ -291,13 +347,14 @@ void imu_zero_calibration(void)
 {
     acc_offset_x = raw_ax;
     acc_offset_y = raw_ay;
-    acc_offset_z = raw_az;
+    acc_offset_z = raw_az - GRAVITY_MS2;
     gyro_offset_x = raw_gx;
     gyro_offset_y = raw_gy;
     gyro_offset_z = raw_gz;
-    angle_offset_roll = raw_roll;
-    angle_offset_pitch = raw_pitch;
-    angle_offset_yaw = raw_yaw;
+    angle_offset_roll = 0.0f;
+    angle_offset_pitch = 0.0f;
+    angle_offset_yaw = 0.0f;
+    yaw_zero_offset = 0.0f;
 
     if (serial_fd >= 0) {
         const uint8_t cmd[] = {0xFF, 0xAA, 0x52, 0x00, 0x00};
@@ -307,11 +364,9 @@ void imu_zero_calibration(void)
     imu_filter_reset(&imu_filter);
     reset_position();
 
-    printf("[INFO] IMU 三轴已置零\n");
+    printf("[INFO] IMU Mahony 已置零\n");
     printf("       加速度偏移: ax=%.3f ay=%.3f az=%.3f\n", acc_offset_x, acc_offset_y, acc_offset_z);
-    printf("       角速度偏移: gx=%.3f gy=%.3f gz=%.3f\n", gyro_offset_x, gyro_offset_y, gyro_offset_z);
-    printf("       姿态角偏移: roll=%.2f pitch=%.2f yaw=%.2f\n",
-           angle_offset_roll, angle_offset_pitch, angle_offset_yaw);
+    printf("       角速度偏移: gx=%.4f gy=%.4f gz=%.4f rad/s\n", gyro_offset_x, gyro_offset_y, gyro_offset_z);
 }
 
 static void update_ros_messages(const imu_sample_t *filtered, int64_t now_ns)
@@ -464,6 +519,11 @@ void timer_callback(rcl_timer_t *timer, int64_t last_call_time)
     const ssize_t n = read(serial_fd, buf, BUFFER_SIZE);
     if (n > 0) {
         feed_serial_data(buf, (size_t)n);
+        collect_startup_calibration_sample();
+    }
+
+    if (!startup_calibrated) {
+        return;
     }
 
     if (serial_fd >= 0) {

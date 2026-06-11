@@ -3,14 +3,15 @@
 #include <math.h>
 #include <stdbool.h>
 
-#define ACC_LP_ALPHA 0.985f
-#define STATIONARY_ACC_THRESH 0.06f
-#define STATIONARY_GYRO_THRESH 0.02f
-#define MOTION_ACC_THRESH 0.10f
-#define MOTION_GYRO_THRESH 0.035f
-#define MAX_VELOCITY 1.5f
-#define MAX_POSITION 50.0f
-#define POS_SMOOTH_ALPHA 0.25f
+#define GRAVITY_MS2 9.80665f
+#define ACC_LP_ALPHA 0.98f
+#define STATIONARY_ACC_DEV_THRESH 0.35f
+#define STATIONARY_GYRO_THRESH 0.03f
+#define MOTION_ACC_HP_THRESH 0.25f
+#define MOTION_GYRO_THRESH 0.06f
+#define MAX_VELOCITY 1.0f
+#define MAX_POSITION 20.0f
+#define POS_SMOOTH_ALPHA 0.12f
 
 static float clampf(float value, float min_value, float max_value)
 {
@@ -74,14 +75,18 @@ void imu_position_update(imu_position_t *pos, const imu_sample_t *sample, int64_
     const float gyro_mag = sqrtf(
         sample->gx * sample->gx + sample->gy * sample->gy + sample->gz * sample->gz);
     const float acc_hp_mag = sqrtf(acc_hp_x * acc_hp_x + acc_hp_y * acc_hp_y + acc_hp_z * acc_hp_z);
+    const float acc_dev = fabsf(acc_mag - GRAVITY_MS2);
 
-    const bool stationary = acc_mag < STATIONARY_ACC_THRESH && gyro_mag < STATIONARY_GYRO_THRESH;
-    const bool moving = acc_hp_mag > MOTION_ACC_THRESH || gyro_mag > MOTION_GYRO_THRESH;
+    const bool stationary = acc_dev < STATIONARY_ACC_DEV_THRESH && gyro_mag < STATIONARY_GYRO_THRESH;
+    const bool moving = acc_hp_mag > MOTION_ACC_HP_THRESH || gyro_mag > MOTION_GYRO_THRESH;
 
     if (stationary || !moving) {
         pos->vel_x = 0.0f;
         pos->vel_y = 0.0f;
         pos->vel_z = 0.0f;
+        pos->pos_x *= 0.95f;
+        pos->pos_y *= 0.95f;
+        pos->pos_z *= 0.95f;
     } else {
         pos->vel_x += acc_hp_x * dt;
         pos->vel_y += acc_hp_y * dt;

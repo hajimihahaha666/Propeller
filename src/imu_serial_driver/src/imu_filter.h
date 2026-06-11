@@ -5,15 +5,6 @@
 #include <stdint.h>
 
 typedef struct {
-    float kp;
-    float ki;
-    float kd;
-    float integral;
-    float prev_error;
-    float integral_limit;
-} pid_controller_t;
-
-typedef struct {
     float ax;
     float ay;
     float az;
@@ -26,29 +17,20 @@ typedef struct {
 } imu_sample_t;
 
 typedef struct {
-    pid_controller_t acc_x;
-    pid_controller_t acc_y;
-    pid_controller_t acc_z;
-    pid_controller_t gyro_x;
-    pid_controller_t gyro_y;
-    pid_controller_t gyro_z;
-    pid_controller_t roll;
-    pid_controller_t pitch;
-    pid_controller_t yaw;
+    float q[4];
+    float integral_fb[3];
+    float two_kp;
+    float two_ki;
+    float inv_sample_freq;
 
     imu_sample_t output;
-    float complementary_alpha;
-    float angle_blend_beta;
     bool initialized;
     int64_t last_update_ns;
 } imu_filter_t;
 
-void pid_init(pid_controller_t *pid, float kp, float ki, float kd);
-void pid_reset(pid_controller_t *pid);
-float pid_smooth(pid_controller_t *pid, float target, float current, float dt);
-
 void imu_filter_init(imu_filter_t *filter);
 void imu_filter_reset(imu_filter_t *filter);
+void imu_filter_set_sample_freq(imu_filter_t *filter, float sample_freq_hz);
 imu_sample_t imu_filter_update(imu_filter_t *filter, const imu_sample_t *input, int64_t now_ns);
 
 #endif

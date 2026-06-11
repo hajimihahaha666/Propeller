@@ -2,9 +2,10 @@
 
 #include <math.h>
 
-#define RAD_TO_DEG 57.2957795f
+#define RAD_TO_DEG 57.2957795131f
 #define DEG_TO_RAD 0.0174532925f
 #define DEFAULT_DT 0.01f
+#define GRAVITY_MS2 9.80665f
 
 static float clampf(float value, float min_value, float max_value)
 {
@@ -28,196 +29,167 @@ static float wrap_angle_deg(float angle)
     return angle;
 }
 
-static float angle_diff_deg(float target, float current)
+static void mahony_get_euler(const imu_filter_t *filter, float *roll_deg, float *pitch_deg, float *yaw_deg)
 {
-    return wrap_angle_deg(target - current);
-}
+    const float q0 = filter->q[0];
+    const float q1 = filter->q[1];
+    const float q2 = filter->q[2];
+    const float q3 = filter->q[3];
 
-void pid_init(pid_controller_t *pid, float kp, float ki, float kd)
-{
-    pid->kp = kp;
-    pid->ki = ki;
-    pid->kd = kd;
-    pid->integral = 0.0f;
-    pid->prev_error = 0.0f;
-    pid->integral_limit = 100.0f;
-}
-
-void pid_reset(pid_controller_t *pid)
-{
-    pid->integral = 0.0f;
-    pid->prev_error = 0.0f;
-}
-
-static float sanitize_float(float value, float fallback)
-{
-    if (isnan(value) || isinf(value)) {
-        return fallback;
+    const float roll = atan2f(2.0f * (q0 * q1 + q2 * q3), 1.0f - 2.0f * (q1 * q1 + q2 * q2));
+    const float sinp = 2.0f * (q0 * q2 - q3 * q1);
+    float pitch;
+    if (fabsf(sinp) >= 1.0f) {
+        pitch = copysignf((float)M_PI / 2.0f, sinp);
+    } else {
+        pitch = asinf(sinp);
     }
-    return value;
-}
+    const float yaw = atan2f(2.0f * (q0 * q3 + q1 * q2), 1.0f - 2.0f * (q2 * q2 + q3 * q3));
 
-float pid_smooth(pid_controller_t *pid, float target, float current, float dt)
-{
-    target = sanitize_float(target, current);
-    current = sanitize_float(current, target);
-
-    if (dt <= 0.0f) {
-        return current;
-    }
-
-    const float error = target - current;
-    pid->integral += error * dt;
-    pid->integral = clampf(pid->integral, -pid->integral_limit, pid->integral_limit);
-
-    const float derivative = clampf((error - pid->prev_error) / dt, -80.0f, 80.0f);
-    pid->prev_error = error;
-
-    const float output = current + pid->kp * error + pid->ki * pid->integral + pid->kd * derivative;
-    return sanitize_float(output, target);
+    *roll_deg = roll * RAD_TO_DEG;
+    *pitch_deg = pitch * RAD_TO_DEG;
+    *yaw_deg = yaw * RAD_TO_DEG;
 }
 
 void imu_filter_init(imu_filter_t *filter)
 {
-    pid_init(&filter->acc_x, 0.15f, 0.005f, 0.04f);
-    pid_init(&filter->acc_y, 0.15f, 0.005f, 0.04f);
-    pid_init(&filter->acc_z, 0.15f, 0.005f, 0.04f);
-    pid_init(&filter->gyro_x, 0.12f, 0.003f, 0.035f);
-    pid_init(&filter->gyro_y, 0.12f, 0.003f, 0.035f);
-    pid_init(&filter->gyro_z, 0.12f, 0.003f, 0.035f);
-    pid_init(&filter->roll, 0.45f, 0.015f, 0.08f);
-    pid_init(&filter->pitch, 0.45f, 0.015f, 0.08f);
-    pid_init(&filter->yaw, 0.40f, 0.012f, 0.06f);
-
+    filter->q[0] = 1.0f;
+    filter->q[1] = 0.0f;
+    filter->q[2] = 0.0f;
+    filter->q[3] = 0.0f;
+    filter->integral_fb[0] = 0.0f;
+    filter->integral_fb[1] = 0.0f;
+    filter->integral_fb[2] = 0.0f;
+    filter->two_kp = 2.0f * 0.8f;
+    filter->two_ki = 2.0f * 0.002f;
+    filter->inv_sample_freq = DEFAULT_DT;
     filter->output = (imu_sample_t){0};
-    filter->complementary_alpha = 0.90f;
-    filter->angle_blend_beta = 0.85f;
     filter->initialized = false;
     filter->last_update_ns = 0;
 }
 
 void imu_filter_reset(imu_filter_t *filter)
 {
-    pid_reset(&filter->acc_x);
-    pid_reset(&filter->acc_y);
-    pid_reset(&filter->acc_z);
-    pid_reset(&filter->gyro_x);
-    pid_reset(&filter->gyro_y);
-    pid_reset(&filter->gyro_z);
-    pid_reset(&filter->roll);
-    pid_reset(&filter->pitch);
-    pid_reset(&filter->yaw);
+    filter->q[0] = 1.0f;
+    filter->q[1] = 0.0f;
+    filter->q[2] = 0.0f;
+    filter->q[3] = 0.0f;
+    filter->integral_fb[0] = 0.0f;
+    filter->integral_fb[1] = 0.0f;
+    filter->integral_fb[2] = 0.0f;
     filter->output = (imu_sample_t){0};
     filter->initialized = false;
     filter->last_update_ns = 0;
+}
+
+void imu_filter_set_sample_freq(imu_filter_t *filter, float sample_freq_hz)
+{
+    if (sample_freq_hz <= 1.0f) {
+        return;
+    }
+    filter->inv_sample_freq = 1.0f / sample_freq_hz;
 }
 
 static float compute_dt(imu_filter_t *filter, int64_t now_ns)
 {
     if (filter->last_update_ns <= 0) {
         filter->last_update_ns = now_ns;
-        return DEFAULT_DT;
+        return filter->inv_sample_freq;
     }
 
     const float dt = (float)(now_ns - filter->last_update_ns) / 1e9f;
     filter->last_update_ns = now_ns;
-    return clampf(dt, 0.001f, 0.1f);
+    return clampf(dt, 0.001f, 0.05f);
 }
 
-static void fuse_roll_pitch(
-    imu_filter_t *filter,
-    const imu_sample_t *input,
-    float dt,
-    float *target_roll,
-    float *target_pitch)
+static void mahony_update(imu_filter_t *filter, float gx, float gy, float gz, float ax, float ay, float az, float dt)
 {
-    const float roll_gyro = filter->output.roll + input->gx * RAD_TO_DEG * dt;
-    const float pitch_gyro = filter->output.pitch + input->gy * RAD_TO_DEG * dt;
+    float q0 = filter->q[0];
+    float q1 = filter->q[1];
+    float q2 = filter->q[2];
+    float q3 = filter->q[3];
 
-    const float denom = sqrtf(input->ay * input->ay + input->az * input->az);
-    const float roll_acc = atan2f(input->ay, input->az) * RAD_TO_DEG;
-    const float pitch_acc = atan2f(-input->ax, denom) * RAD_TO_DEG;
+    float norm = sqrtf(ax * ax + ay * ay + az * az);
+    if (norm < 1e-6f) {
+        return;
+    }
 
-    const float alpha = filter->complementary_alpha;
-    const float beta = filter->angle_blend_beta;
+    const float inv_norm = 1.0f / norm;
+    ax *= inv_norm;
+    ay *= inv_norm;
+    az *= inv_norm;
 
-    float roll_fused = alpha * roll_gyro + (1.0f - alpha) * roll_acc;
-    float pitch_fused = alpha * pitch_gyro + (1.0f - alpha) * pitch_acc;
+    const float acc_mag = norm;
+    float two_kp = filter->two_kp;
+    if (fabsf(acc_mag - GRAVITY_MS2) > 1.2f) {
+        two_kp *= 0.15f;
+    }
 
-    roll_fused = beta * roll_fused + (1.0f - beta) * input->roll;
-    pitch_fused = beta * pitch_fused + (1.0f - beta) * input->pitch;
+    const float vx = 2.0f * (q1 * q3 - q0 * q2);
+    const float vy = 2.0f * (q0 * q1 + q2 * q3);
+    const float vz = q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3;
 
-    *target_roll = wrap_angle_deg(roll_fused);
-    *target_pitch = wrap_angle_deg(pitch_fused);
-}
+    float ex = ay * vz - az * vy;
+    float ey = az * vx - ax * vz;
+    float ez = ax * vy - ay * vx;
 
-static float fuse_yaw(imu_filter_t *filter, const imu_sample_t *input, float dt)
-{
-    const float gz = fabsf(input->gz) < 0.008f ? 0.0f : input->gz;
-    const float yaw_gyro = wrap_angle_deg(filter->output.yaw + gz * RAD_TO_DEG * dt);
-    const float alpha = filter->complementary_alpha;
-    return wrap_angle_deg(alpha * yaw_gyro + (1.0f - alpha) * input->yaw);
-}
+    const float half_t = dt * 0.5f;
 
-static float apply_gyro_deadband(float value)
-{
-    return fabsf(value) < 0.008f ? 0.0f : value;
+    if (filter->two_ki > 0.0f) {
+        filter->integral_fb[0] += filter->two_ki * ex * half_t;
+        filter->integral_fb[1] += filter->two_ki * ey * half_t;
+        filter->integral_fb[2] += filter->two_ki * ez * half_t;
+        filter->integral_fb[0] = clampf(filter->integral_fb[0], -0.1f, 0.1f);
+        filter->integral_fb[1] = clampf(filter->integral_fb[1], -0.1f, 0.1f);
+        filter->integral_fb[2] = clampf(filter->integral_fb[2], -0.1f, 0.1f);
+        gx += filter->integral_fb[0];
+        gy += filter->integral_fb[1];
+        gz += filter->integral_fb[2];
+    }
+
+    gx += two_kp * ex;
+    gy += two_kp * ey;
+    gz += two_kp * ez;
+
+    q0 += (-q1 * gx - q2 * gy - q3 * gz) * half_t;
+    q1 += (q0 * gx + q2 * gz - q3 * gy) * half_t;
+    q2 += (q0 * gy - q1 * gz + q3 * gx) * half_t;
+    q3 += (q0 * gz + q1 * gy - q2 * gx) * half_t;
+
+    norm = sqrtf(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
+    if (norm < 1e-6f) {
+        return;
+    }
+    const float inv_q = 1.0f / norm;
+    filter->q[0] = q0 * inv_q;
+    filter->q[1] = q1 * inv_q;
+    filter->q[2] = q2 * inv_q;
+    filter->q[3] = q3 * inv_q;
 }
 
 imu_sample_t imu_filter_update(imu_filter_t *filter, const imu_sample_t *input, int64_t now_ns)
 {
     const float dt = compute_dt(filter, now_ns);
+    filter->inv_sample_freq = dt;
 
-    imu_sample_t smoothed_input = *input;
-    smoothed_input.gx = apply_gyro_deadband(smoothed_input.gx);
-    smoothed_input.gy = apply_gyro_deadband(smoothed_input.gy);
-    smoothed_input.gz = apply_gyro_deadband(smoothed_input.gz);
+    filter->output.ax = input->ax;
+    filter->output.ay = input->ay;
+    filter->output.az = input->az;
+    filter->output.gx = input->gx;
+    filter->output.gy = input->gy;
+    filter->output.gz = input->gz;
 
     if (!filter->initialized) {
-        filter->output = smoothed_input;
+        mahony_update(filter, input->gx, input->gy, input->gz, input->ax, input->ay, input->az, dt);
         filter->initialized = true;
-        return filter->output;
+    } else {
+        mahony_update(filter, input->gx, input->gy, input->gz, input->ax, input->ay, input->az, dt);
     }
 
-    filter->output.ax = pid_smooth(&filter->acc_x, smoothed_input.ax, filter->output.ax, dt);
-    filter->output.ay = pid_smooth(&filter->acc_y, smoothed_input.ay, filter->output.ay, dt);
-    filter->output.az = pid_smooth(&filter->acc_z, smoothed_input.az, filter->output.az, dt);
-    filter->output.gx = pid_smooth(&filter->gyro_x, smoothed_input.gx, filter->output.gx, dt);
-    filter->output.gy = pid_smooth(&filter->gyro_y, smoothed_input.gy, filter->output.gy, dt);
-    filter->output.gz = pid_smooth(&filter->gyro_z, smoothed_input.gz, filter->output.gz, dt);
-
-    float target_roll = smoothed_input.roll;
-    float target_pitch = smoothed_input.pitch;
-    fuse_roll_pitch(filter, &smoothed_input, dt, &target_roll, &target_pitch);
-    const float target_yaw = fuse_yaw(filter, &smoothed_input, dt);
-
-    filter->output.roll = pid_smooth(
-        &filter->roll,
-        target_roll,
-        filter->output.roll + angle_diff_deg(target_roll, filter->output.roll),
-        dt);
+    mahony_get_euler(filter, &filter->output.roll, &filter->output.pitch, &filter->output.yaw);
     filter->output.roll = wrap_angle_deg(filter->output.roll);
-
-    filter->output.pitch = pid_smooth(
-        &filter->pitch,
-        target_pitch,
-        filter->output.pitch + angle_diff_deg(target_pitch, filter->output.pitch),
-        dt);
     filter->output.pitch = wrap_angle_deg(filter->output.pitch);
-
-    filter->output.yaw = pid_smooth(
-        &filter->yaw,
-        target_yaw,
-        filter->output.yaw + angle_diff_deg(target_yaw, filter->output.yaw),
-        dt);
     filter->output.yaw = wrap_angle_deg(filter->output.yaw);
-
-    filter->output.ax = sanitize_float(filter->output.ax, smoothed_input.ax);
-    filter->output.ay = sanitize_float(filter->output.ay, smoothed_input.ay);
-    filter->output.az = sanitize_float(filter->output.az, smoothed_input.az);
-    filter->output.gx = sanitize_float(filter->output.gx, smoothed_input.gx);
-    filter->output.gy = sanitize_float(filter->output.gy, smoothed_input.gy);
-    filter->output.gz = sanitize_float(filter->output.gz, smoothed_input.gz);
 
     return filter->output;
 }
