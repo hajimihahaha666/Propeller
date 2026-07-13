@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import math
 import mimetypes
@@ -139,7 +140,32 @@ SPI_SPEED_HZ = 200_000
 SPI_FRAME_GAP_SEC = 0.001
 CONTROL_LOOP_SEC = 0.025  # 40Hz
 IDLE_KEEPALIVE_SEC = 1.0
-spi_lock = threading.Lock()
+spi_lock = threading.Lock()  # 进程内串行
+
+# 跨进程 SPI 总线锁：与 spi_send_burst.py 用同一把文件锁，保证守护进程与任何
+# 测试脚本永不同时占用 /dev/spidev0.0。总线争用会让 STM32 收到交错帧、校验失败，
+# 固件每累计 200 次失败自动切一次 SPI 模式 → 与 Pi 固定 mode 0 永久错位、无法自愈。
+SPI_LOCK_FILE = Path("/tmp/propeller_spi.lock")
+_spi_lock_fh = None
+
+
+def _spi_bus_lock():
+    global _spi_lock_fh
+    if _spi_lock_fh is None:
+        SPI_LOCK_FILE.touch(exist_ok=True)
+        _spi_lock_fh = SPI_LOCK_FILE.open("w")
+    return _spi_lock_fh
+
+
+# 逻辑通道 -> 物理通道 的置换：物理[i] = 逻辑[CHANNEL_WIRING[i]]。
+# 接线为自然映射（通道 index i → 电机 i+1）：A8→M1, A9→M2, A10→M3, A11→M4,
+# B6→M5, B7→M6, B8→M7, B9→M8（用户确认 A9 接电机 2）。故不做任何换位。
+# 若日后确实发现某两路接反，只需在此表对调对应下标。
+CHANNEL_WIRING = [0, 1, 2, 3, 4, 5, 6, 7]
+
+
+def apply_wiring(channels: list[int]) -> list[int]:
+    return [channels[i] for i in CHANNEL_WIRING]
 if ESC_SPI:
     try:
         Path("/dev/spidev0.0").resolve()
@@ -202,14 +228,17 @@ def spi_push_channels(channels: list[int], *, burst: int = 1) -> None:
     global spi_tx_count, spi_err_count, last_spi_channels, last_spi_send_time, last_pushed_channels
     if ESC_SPI is None:
         return
-    last_spi_channels = list(channels)
+    last_spi_channels = list(channels)          # 显示用：逻辑通道（重映射前）
+    phys_channels = apply_wiring(channels)      # 实际下发：物理通道（重映射后）
     ok = False
     with spi_lock:
+        lockf = _spi_bus_lock()
+        fcntl.flock(lockf, fcntl.LOCK_EX)       # 跨进程独占总线
         try:
             esc = spi_get()
             if esc is None:
                 return
-            esc.set_all(channels)
+            esc.set_all(phys_channels)
             for _ in range(max(1, burst)):
                 esc.send_frame()
                 if burst > 1:
@@ -224,6 +253,8 @@ def spi_push_channels(channels: list[int], *, burst: int = 1) -> None:
             spi_close()
             if spi_err_count <= 5 or spi_err_count % 50 == 0:
                 print(f"[ERROR] SPI 发送失败 #{spi_err_count}: {exc}")
+        finally:
+            fcntl.flock(lockf, fcntl.LOCK_UN)
     with state_lock:
         state["spi_tx_count"] = spi_tx_count
         state["spi_err_count"] = spi_err_count
@@ -307,7 +338,7 @@ def compute_thruster_commands() -> tuple[float, float, float, float, float]:
 
     elif mode == "manual":
         imu_controller.reset()
-        if not holding or manual_age > 0.5:
+        if not holding:
             h = p = r = s = y = 0.0
 
     with state_lock:
@@ -540,7 +571,14 @@ class ImuWebHandler(BaseHTTPRequestHandler):
             with manual_lock:
                 global last_manual_time, manual_holding
                 now_ts = time.time()
-                holding = bool(data.get("holding", False))
+                if "holding" in data:
+                    holding = bool(data["holding"])
+                else:
+                    # 兼容未刷新的旧页面：有非零轴即视为按住
+                    holding = any(
+                        abs(float(data.get(k, 0.0))) > 0.01
+                        for k in ("heave", "pitch", "roll", "surge", "yaw")
+                    )
                 manual_holding = holding
                 if holding:
                     last_manual_time = now_ts
@@ -558,6 +596,14 @@ class ImuWebHandler(BaseHTTPRequestHandler):
                     manual_cmd_sticky.clear()
                 if "speed_mode" in data:
                     manual_cmd["speed_mode"] = str(data["speed_mode"])
+            # 键盘/摇杆一介入(holding)就自动退出独立电机模式，避免刷新网页后
+            # 服务器仍卡在 individual_motor_active=True 而键盘永久失灵。
+            if holding:
+                with individual_motor_lock:
+                    global individual_motor_active
+                    if individual_motor_active:
+                        individual_motor_active = False
+                        print("[INFO] 手动控制介入，自动退出独立电机模式")
             push_control_spi_now()
             self._send_json({"ok": True})
             return
@@ -626,7 +672,7 @@ class ImuWebHandler(BaseHTTPRequestHandler):
                 self.send_error(400, "Bad Request")
                 return
             with individual_motor_lock:
-                global individual_motor_active, individual_motor_values
+                global individual_motor_values  # individual_motor_active 已在上方声明为 global
                 if "active" in data:
                     individual_motor_active = bool(data["active"])
                 if "channels" in data:
