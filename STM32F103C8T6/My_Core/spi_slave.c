@@ -156,18 +156,22 @@ void SPI_Slave_Poll(void)
         }
     }
 
-    /* Fallback: if SPI ever becomes READY (e.g., after an error), re-arm here. */
+    /* 仅在接收出错后兜底重启；正常由 ISR 自行 re-arm，避免主循环打乱帧对齐 */
+    if (hspi2.State == HAL_SPI_STATE_READY && debug_spi_error) {
+        spi_poll_start_count++;
+        memset((void*)spi_rx_buf, 0, sizeof(spi_rx_buf));
+        if (HAL_SPI_Receive_IT(&hspi2, spi_rx_buf, sizeof(spi_rx_buf)) != HAL_OK) {
+            spi_poll_start_err_count++;
+        } else {
+            debug_spi_error = 0;
+        }
+        return;
+    }
+
     if (hspi2.State != HAL_SPI_STATE_READY)
     {
         spi_poll_busy_skip_count++;
         return;
-    }
-
-    spi_poll_start_count++;
-    memset((void*)spi_rx_buf, 0, sizeof(spi_rx_buf));
-    if (HAL_SPI_Receive_IT(&hspi2, spi_rx_buf, sizeof(spi_rx_buf)) != HAL_OK)
-    {
-        spi_poll_start_err_count++;
     }
 }
 
@@ -277,21 +281,36 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
         if (spi_validate_frame(spi_rx_buf, sizeof(spi_rx_buf))) {
             debug_spi_frame_ready = 1;
             debug_spi_error = 0;
-            spi_validate_ok_count++; // 校验成功计数
+            spi_validate_ok_count++;
             ESC_UpdateFromBuffer(spi_rx_buf, sizeof(spi_rx_buf));
             ESC_ApplyToPWM();
             spi_pwm_update_count++;
             debug_spi_frame_count++;
+        } else if (spi_dbg_aligned_crc_ok) {
+            debug_spi_frame_ready = 1;
+            debug_spi_error = 0;
+            spi_validate_ok_count++;
+            ESC_UpdateFromBuffer((uint8_t *)spi_dbg_aligned_bytes, sizeof(spi_dbg_aligned_bytes));
+            ESC_ApplyToPWM();
+            spi_pwm_update_count++;
+            debug_spi_frame_count++;
+        } else if (spi_dbg_hdr_pos != 0xFF) {
+            /* 次优：在窗口内找到帧头但 CRC 未过，仍尝试按对齐位置解析油门 */
+            uint8_t tmp[26];
+            for (uint8_t j = 0; j < 26; ++j)
+                tmp[j] = spi_rx_buf[(uint8_t)((spi_dbg_hdr_pos + j) % 26)];
+            if (tmp[0] == 0xAA && tmp[1] == 0x01 && tmp[2] == 16) {
+                ESC_UpdateFromBuffer(tmp, sizeof(tmp));
+                ESC_ApplyToPWM();
+                spi_pwm_update_count++;
+            }
+            debug_spi_frame_ready = 0;
+            debug_spi_error = 1;
+            spi_validate_fail_count++;
         } else {
             debug_spi_frame_ready = 0;
             debug_spi_error = 1;
-            spi_validate_fail_count++; // 校验失败计数
-
-            /* 每累计一定失败次数就切换一次 SPI 模式，帮助定位 CPOL/CPHA */
-            if ((spi_validate_fail_count % 200u) == 0u) {
-                spi_mode_index = (uint8_t)((spi_mode_index + 1u) & 0x03u);
-                spi_pending_mode_switch = 1u;
-            }
+            spi_validate_fail_count++;
         }
 
         /* Always arm next receive immediately to capture the next frame header. */

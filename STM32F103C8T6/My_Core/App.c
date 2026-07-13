@@ -52,8 +52,8 @@ volatile uint8_t debug_spi_error = 0;                /* SPI 接收错误标志 *
 volatile uint8_t debug_tim4_test_active = 0;
 volatile uint16_t debug_tim4_pulse = 0;
 
-/* Set to 1 to run a brief PWM self-test at boot */
-#define PWM_SELF_TEST 1
+/* Set to 0: 上电自检扫 1000~2000us 会使很多电调进入校准/锁定，导致之后不转 */
+#define PWM_SELF_TEST 0
 
 /* Simple test for TIM4 only - bypasses other code */
 static void Test_TIM4_Only(void)
@@ -156,22 +156,8 @@ void System_Init(void)
     /* Force one-time PWM update to ensure outputs are driven immediately */
     ESC_ApplyToPWM();
 
-#if PWM_SELF_TEST
-    /* Run PWM self-test before entering main loop */
-    HAL_Delay(100);
-
-    /* Fixed value test: 1500us (mid) -> 1000us (low) -> 2000us (high) -> back to 1500us */
-    ESC_PWM_Test_Fixed(1500);
-    HAL_Delay(1000);
-
-    ESC_PWM_Test_Fixed(1000);
-    HAL_Delay(1000);
-
-    ESC_PWM_Test_Fixed(2000);
-    HAL_Delay(1000);
-
-    ESC_PWM_Test_Fixed(1500);
-#endif /* PWM_SELF_TEST */
+    /* 上电保持中位 3s，让电调完成解锁（勿扫 1000~2000，否则电调会进校准模式） */
+    HAL_Delay(3000);
 }
 
 /********************************************************************************************************

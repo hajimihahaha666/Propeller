@@ -24,4 +24,4 @@ pai_stm32f103c8t6/app.o: ..\My_Core\App.c ..\My_Core\App.h \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_hal_uart.h \
   ..\Core\Inc\tim.h ..\My_Core\Step_Motor.h ..\My_Core\UART.h \
   ..\Core\Inc\usart.h ..\My_Core\Ibus.h ..\My_Core\Servo.h \
-  ..\My_Core\esc_spi.h ..\My_Core\spi_slave.h ..\My_Core\Pwm.h
+  ..\My_Core\esc_spi.h ..\My_Core\spi_slave.h
