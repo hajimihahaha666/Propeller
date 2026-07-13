@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from imu_controller import ImuThrusterController, wrap_angle_deg
+from thruster_mixer import mix_thrusters
 
 try:
     from esc_spi import ESC_SPI
@@ -98,6 +99,9 @@ state: dict[str, object] = {
     "thruster_cmd_heave": 0.0,
     "thruster_cmd_surge": 0.0,
     "spi_active": False,
+    "spi_tx_count": 0,
+    "spi_err_count": 0,
+    "last_spi_channels": [0] * 8,
 }
 
 state_lock = threading.Lock()
@@ -114,6 +118,10 @@ manual_cmd = {
 }
 manual_lock = threading.Lock()
 last_manual_time = time.time()
+manual_holding = False  # 前端按键按住时为 True，松开即 False → 手动模式立即停转
+# 仅在 holding 期间防止偶发零帧覆盖（松开时 holding=False 会清空 sticky）
+manual_cmd_sticky: dict[str, tuple[float, float]] = {}
+MANUAL_STICKY_SEC = 0.15
 
 control_mode = "manual"
 control_mode_lock = threading.Lock()
@@ -122,32 +130,114 @@ imu_controller = ImuThrusterController()
 last_control_tick = time.time()
 
 esc_instance = None
+spi_tx_count = 0
+spi_err_count = 0
+last_spi_channels = [0] * 8
+last_pushed_channels: list[int] | None = None
+last_spi_send_time = 0.0
+SPI_SPEED_HZ = 200_000
+SPI_FRAME_GAP_SEC = 0.001
+CONTROL_LOOP_SEC = 0.025  # 40Hz
+IDLE_KEEPALIVE_SEC = 1.0
+spi_lock = threading.Lock()
 if ESC_SPI:
     try:
-        esc_instance = ESC_SPI(bus=0, device=0, max_speed_hz=5000000, mode=0)
-        esc_instance.fill_center()
+        Path("/dev/spidev0.0").resolve()
         state["spi_active"] = True
-        print("[INFO] SPI 电调已连接 (STM32)")
-    except Exception as exc:
-        print(f"[ERROR] SPI 初始化失败: {exc}")
+        print("[INFO] SPI 设备就绪 (40Hz 控制环 + 指令变化立即下发)")
+    except OSError as exc:
+        state["spi_active"] = False
+        print(f"[WARN] SPI 设备不可用: {exc}")
+
+
+def spi_get() -> "ESC_SPI | None":
+    """持久 SPI 连接，避免每次 open/close 增加 tens of ms 延迟。"""
+    global esc_instance
+    if ESC_SPI is None:
+        return None
+    if esc_instance is None:
+        esc_instance = ESC_SPI(bus=0, device=0, max_speed_hz=SPI_SPEED_HZ, mode=0)
+    return esc_instance
+
+
+def spi_close() -> None:
+    global esc_instance
+    if esc_instance is not None:
+        try:
+            esc_instance.close()
+        except OSError:
+            pass
         esc_instance = None
+
+
+def arm_escs_at_boot() -> None:
+    """服务启动后先发 3s 中位 PWM，帮助电调从自检/掉电状态完成解锁。"""
+    if ESC_SPI is None:
+        return
+    print("[INFO] 电调解锁：发送 3s 中位 PWM ...")
+    for _ in range(30):
+        spi_push_channels([0] * 8, burst=2)
+        time.sleep(0.1)
+    print("[INFO] 电调解锁完成，可以控制")
 
 
 def clamp(val: float, min_val: float, max_val: float) -> float:
     return max(min_val, min(val, max_val))
 
 
-def mix_thrusters(h: float, p: float, r: float, s: float, y: float, limit: float) -> list[int]:
-    t1 = h + p + r
-    t2 = h + r
-    t3 = h - p + r
-    t4 = h + p - r
-    t5 = h - r
-    t6 = h - p - r
-    t7 = s + y
-    t8 = s - y
-    channels = [t1, t2, t3, t4, t5, t6, t7, t8]
-    return [int(clamp(ch * limit, -limit, limit)) for ch in channels]
+def compute_channels_now() -> list[int]:
+    """按当前状态立即计算 8 路 SPI 通道值。"""
+    speed_limits = {"slow": 25.0, "medium": 50.0, "fast": 80.0}
+    with individual_motor_lock:
+        if individual_motor_active:
+            return [int(clamp(v, -100, 100)) for v in individual_motor_values]
+    with manual_lock:
+        limit = speed_limits.get(manual_cmd["speed_mode"], 50.0)
+    h, p, r, s, y = compute_thruster_commands()
+    return mix_thrusters(h, p, r, s, y, limit)
+
+
+def spi_push_channels(channels: list[int], *, burst: int = 1) -> None:
+    """向 STM32 下发 SPI 帧。持久连接 + 短帧间隔。"""
+    global spi_tx_count, spi_err_count, last_spi_channels, last_spi_send_time, last_pushed_channels
+    if ESC_SPI is None:
+        return
+    last_spi_channels = list(channels)
+    ok = False
+    with spi_lock:
+        try:
+            esc = spi_get()
+            if esc is None:
+                return
+            esc.set_all(channels)
+            for _ in range(max(1, burst)):
+                esc.send_frame()
+                if burst > 1:
+                    time.sleep(SPI_FRAME_GAP_SEC)
+            spi_tx_count += 1
+            last_spi_send_time = time.time()
+            last_pushed_channels = list(channels)
+            ok = True
+        except OSError as exc:
+            ok = False
+            spi_err_count += 1
+            spi_close()
+            if spi_err_count <= 5 or spi_err_count % 50 == 0:
+                print(f"[ERROR] SPI 发送失败 #{spi_err_count}: {exc}")
+    with state_lock:
+        state["spi_tx_count"] = spi_tx_count
+        state["spi_err_count"] = spi_err_count
+        state["last_spi_channels"] = list(channels)
+        if ok:
+            state["spi_active"] = True
+
+
+def push_control_spi_now() -> None:
+    """HTTP 控制请求到达后立即混控并下发 SPI（不等待后台线程）。"""
+    channels = compute_channels_now()
+    prev = last_pushed_channels
+    if prev is None or prev != channels:
+        spi_push_channels(channels, burst=1)
 
 
 def compute_thruster_commands() -> tuple[float, float, float, float, float]:
@@ -177,6 +267,13 @@ def compute_thruster_commands() -> tuple[float, float, float, float, float]:
     with manual_lock:
         manual = dict(manual_cmd)
         manual_age = now - last_manual_time
+        holding = manual_holding
+        now_ts = now
+        if holding:
+            for key in ("heave", "pitch", "roll", "surge", "yaw"):
+                sticky = manual_cmd_sticky.get(key)
+                if sticky and now_ts < sticky[1] and abs(manual[key]) < 0.01:
+                    manual[key] = sticky[0]
 
     h = manual["heave"]
     p = manual["pitch"]
@@ -210,7 +307,7 @@ def compute_thruster_commands() -> tuple[float, float, float, float, float]:
 
     elif mode == "manual":
         imu_controller.reset()
-        if manual_age > 1.0:
+        if not holding or manual_age > 0.5:
             h = p = r = s = y = 0.0
 
     with state_lock:
@@ -229,33 +326,31 @@ def compute_thruster_commands() -> tuple[float, float, float, float, float]:
 
 
 def update_thrusters() -> None:
-    speed_limits = {"slow": 25.0, "medium": 50.0, "fast": 80.0}
-
+    """混控计算 + SPI 下发：40Hz；通道变化或松键归零立即发送。"""
+    global last_pushed_channels
     while True:
+        channels = compute_channels_now()
+
         with individual_motor_lock:
             indi_active = individual_motor_active
             indi_values = list(individual_motor_values)
-
-        if indi_active:
-            channels = [int(clamp(v, -100, 100)) for v in indi_values]
-        else:
-            with manual_lock:
-                limit = speed_limits.get(manual_cmd["speed_mode"], 50.0)
-            h, p, r, s, y = compute_thruster_commands()
-            channels = mix_thrusters(h, p, r, s, y, limit)
-
         with state_lock:
             state["individual_motor_active"] = indi_active
-            state["individual_motor_values"] = list(indi_values)
+            state["individual_motor_values"] = indi_values
+            state["last_spi_channels"] = list(channels)
 
-        if esc_instance:
-            esc_instance.set_all(channels)
-            try:
-                esc_instance.send_frame()
-            except OSError:
-                pass
+        prev = last_pushed_channels
+        changed = prev is None or prev != channels
+        now = time.time()
+        moving = any(ch != 0 for ch in channels)
+        if changed:
+            spi_push_channels(channels, burst=1)
+        elif moving:
+            spi_push_channels(channels, burst=1)
+        elif now - last_spi_send_time >= IDLE_KEEPALIVE_SEC:
+            spi_push_channels([0] * 8, burst=1)
 
-        time.sleep(0.01)
+        time.sleep(CONTROL_LOOP_SEC)
 
 
 def update_state_from_line(line: str) -> None:
@@ -353,6 +448,17 @@ def imu_reader_loop() -> None:
 
 class ImuWebHandler(BaseHTTPRequestHandler):
     server_version = "RobotWebServer/3.0"
+    # 保持默认 HTTP/1.0：SSE /stream 无 Content-Length/分块编码，若开 HTTP/1.1 keep-alive
+    # 会让浏览器 EventSource 无法确定消息边界 -> 面板显示“断开”。短连接 + 下面的 TCP_NODELAY
+    # 在网线直连下延迟已足够低。
+
+    def setup(self) -> None:
+        super().setup()
+        # 关闭 Nagle：小体积控制包立即发出，去掉最多 ~40ms 的合并等待。
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
 
     def log_message(self, format: str, *args: object) -> None:
         if self.path.startswith(("/stream", "/api/control")):
@@ -432,13 +538,27 @@ class ImuWebHandler(BaseHTTPRequestHandler):
                 self.send_error(400, "Bad Request")
                 return
             with manual_lock:
-                global last_manual_time
-                last_manual_time = time.time()
-                for key in ("heave", "pitch", "roll", "surge", "yaw"):
-                    if key in data:
-                        manual_cmd[key] = float(data[key])
+                global last_manual_time, manual_holding
+                now_ts = time.time()
+                holding = bool(data.get("holding", False))
+                manual_holding = holding
+                if holding:
+                    last_manual_time = now_ts
+                    for key in ("heave", "pitch", "roll", "surge", "yaw"):
+                        if key in data:
+                            val = float(data[key])
+                            manual_cmd[key] = val
+                            if abs(val) > 0.01:
+                                manual_cmd_sticky[key] = (val, now_ts + MANUAL_STICKY_SEC)
+                            else:
+                                manual_cmd_sticky.pop(key, None)
+                else:
+                    for key in ("heave", "pitch", "roll", "surge", "yaw"):
+                        manual_cmd[key] = float(data.get(key, 0.0))
+                    manual_cmd_sticky.clear()
                 if "speed_mode" in data:
                     manual_cmd["speed_mode"] = str(data["speed_mode"])
+            push_control_spi_now()
             self._send_json({"ok": True})
             return
 
@@ -513,6 +633,7 @@ class ImuWebHandler(BaseHTTPRequestHandler):
                     ch = data["channels"]
                     if len(ch) == 8:
                         individual_motor_values = [float(v) for v in ch]
+            push_control_spi_now()
             self._send_json({"ok": True, "active": individual_motor_active})
             return
 
@@ -553,6 +674,7 @@ def main() -> None:
         raise SystemExit(f"缺少网页目录: {STATIC_DIR}")
 
     threading.Thread(target=imu_reader_loop, daemon=True).start()
+    threading.Thread(target=arm_escs_at_boot, daemon=True).start()
     threading.Thread(target=update_thrusters, daemon=True).start()
 
     server = ThreadingHTTPServer((WEB_HOST, WEB_PORT), ImuWebHandler)
@@ -561,7 +683,7 @@ def main() -> None:
     print("  水下机器人 IMU 闭环控制服务已启动")
     print(f"  网线直连: http://{ETH_DIRECT_IP}:{WEB_PORT}")
     print(f"  当前可用: http://{local_ip}:{WEB_PORT}")
-    print(f"  SPI/STM32: {'已连接' if esc_instance else '模拟模式'}")
+    print(f"  SPI/STM32: {'已连接' if state.get('spi_active') else '模拟模式'}")
     print("  控制模式: manual / imu_hold / hybrid")
     print("=" * 56)
 
@@ -571,10 +693,8 @@ def main() -> None:
         print("\n[INFO] 服务已停止")
     finally:
         server.server_close()
-        if esc_instance:
-            esc_instance.fill_center()
-            esc_instance.send_frame()
-            esc_instance.close()
+        spi_push_channels([0] * 8, burst=3)
+        spi_close()
 
 
 if __name__ == "__main__":

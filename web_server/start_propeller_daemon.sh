@@ -7,6 +7,8 @@ WS="/home/hansing/imu_ws"
 LOG_DIR="/tmp"
 IMU_LOG="${LOG_DIR}/imu_serial.log"
 WEB_LOG="${LOG_DIR}/imu_web.log"
+CAM_LOG="${LOG_DIR}/cam.log"
+CAM_SCRIPT="/home/hansing/camera_stream.py"
 PI_IP="192.168.50.1"
 
 log() {
@@ -71,6 +73,18 @@ log "启动网页服务 http://${PI_IP}:8080 ..."
 python3 "${WS}/web_server/imu_web_server.py" >> "${WEB_LOG}" 2>&1 &
 web_pid=$!
 
+# 摄像头 MJPEG 流（1080p，端口 8081，供网页 <img> 直接读取）
+cam_pid=""
+if [ -e /dev/video0 ] && [ -f "${CAM_SCRIPT}" ]; then
+    log "启动摄像头流 http://${PI_IP}:8081 ..."
+    pkill -f camera_stream.py 2>/dev/null || true
+    sleep 1
+    python3 -u "${CAM_SCRIPT}" >> "${CAM_LOG}" 2>&1 &
+    cam_pid=$!
+else
+    log "[WARN] /dev/video0 或 ${CAM_SCRIPT} 缺失，跳过摄像头"
+fi
+
 sleep 3
 if curl -sf -m 5 "http://127.0.0.1:8080/api/status" >/dev/null; then
     log "网页服务就绪"
@@ -81,17 +95,16 @@ fi
 cleanup() {
     log "停止 propeller 服务..."
     [ -n "${imu_pid}" ] && kill "${imu_pid}" 2>/dev/null || true
+    [ -n "${cam_pid}" ] && kill "${cam_pid}" 2>/dev/null || true
     kill "${web_pid}" 2>/dev/null || true
     pkill -f imu_serial_node 2>/dev/null || true
     pkill -f imu_web_server.py 2>/dev/null || true
+    pkill -f camera_stream.py 2>/dev/null || true
     exit 0
 }
 
 trap cleanup INT TERM
 
-if [ -n "${imu_pid}" ]; then
-    wait -n "${imu_pid}" "${web_pid}" 2>/dev/null || wait "${web_pid}"
-else
-    wait "${web_pid}"
-fi
+# 任一关键进程退出即返回 -> systemd Restart=always 会整体拉起（含摄像头）
+wait -n ${imu_pid} ${web_pid} ${cam_pid} 2>/dev/null || wait "${web_pid}"
 cleanup

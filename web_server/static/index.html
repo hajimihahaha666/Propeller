@@ -18,19 +18,26 @@
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 10px; overflow-x: hidden; touch-action: manipulation;}
-    .container { max-width: 1200px; margin: 0 auto; display: grid; gap: 15px; grid-template-columns: 1fr; }
+    .container { max-width: 1400px; margin: 0 auto; display: grid; gap: 15px; grid-template-columns: 1fr; }
     @media(min-width: 900px) { .container { grid-template-columns: 350px 1fr; } }
     .card { background: var(--card-bg); border-radius: 12px; padding: 15px; border: 1px solid var(--border); }
     h2 { font-size: 1.1rem; margin-bottom: 12px; color: var(--primary); display: flex; align-items: center; gap: 8px; }
     .status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--danger); }
     .status-dot.online { background: var(--success); }
-    
+
+    /* Camera Stream */
+    .camera-card { overflow: hidden; }
+    .camera-card .cam-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .camera-card .cam-status { font-size: 0.8rem; color: var(--success); }
+    .camera-wrap { width: 100%; border-radius: 8px; overflow: hidden; background: #000; line-height: 0; }
+    .camera-wrap img { width: 100%; height: auto; display: block; }
+
     /* IMU Info */
     .metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px; }
     .metric { background: rgba(0,0,0,0.2); padding: 8px; border-radius: 8px; text-align: center; }
     .metric .label { font-size: 0.75rem; color: var(--text-muted); }
     .metric .value { font-size: 1rem; font-weight: 600; font-variant-numeric: tabular-nums; }
-    
+
     /* Zero Control */
     .zero-group { display: flex; gap: 10px; margin-bottom: 10px; }
     .btn { flex: 1; padding: 8px; border: none; border-radius: 6px; background: var(--border); color: var(--text); font-weight: 500; cursor: pointer; transition: 0.2s; }
@@ -38,7 +45,7 @@
     .btn:hover:not(:disabled) { filter: brightness(1.2); }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .btn-set { background: var(--success); color: #000; flex: 0.5; }
-    
+
     /* Control Layout */
     .controls { display: grid; grid-template-columns: 1fr; gap: 15px; }
     .keyboard-panel {
@@ -58,6 +65,8 @@
       font-size: 0.85rem; font-weight: 600;
       color: var(--text-muted);
       user-select: none;
+      cursor: pointer;
+      touch-action: none;
     }
     .key.active { background: var(--primary); color: #000; border-color: var(--primary); box-shadow: 0 0 12px rgba(56,189,248,0.5); }
     .key.wide { min-width: 120px; }
@@ -74,12 +83,12 @@
     }
     .focus-hint.warn { color: var(--warn, #f59e0b); border-color: #f59e0b; }
     #scene-wrap { width: 100%; height: 200px; border-radius: 12px; overflow: hidden; background: #000; position: relative; }
-    
+
     .mode-btns { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
     .mode-btn { flex: 1; min-width: 90px; padding: 8px 6px; border: 1px solid var(--primary); background: transparent; color: var(--primary); border-radius: 6px; cursor: pointer; font-size: 0.82rem; }
     .mode-btn.active { background: var(--primary); color: #000; font-weight: 600; }
     .pid-info { font-size: 0.78rem; color: var(--text-muted); line-height: 1.6; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 8px; margin-top: 8px; }
-    
+
   </style>
 </head>
 <body>
@@ -92,14 +101,14 @@
       <div id="scene-wrap">
         <canvas id="scene"></canvas>
       </div>
-      
+
       <h3 style="font-size: 0.9rem; margin: 15px 0 8px; color: var(--text-muted);">姿态角 (°)</h3>
       <div class="metric-grid">
         <div class="metric"><div class="label">Roll (X)</div><div class="value" id="roll">0.000</div></div>
         <div class="metric"><div class="label">Pitch (Y)</div><div class="value" id="pitch">0.000</div></div>
         <div class="metric"><div class="label">Yaw (Z)</div><div class="value" id="yaw">0.000</div></div>
       </div>
-      
+
       <h3 style="font-size: 0.9rem; margin: 15px 0 8px; color: var(--text-muted);">多零位控制</h3>
       <div class="zero-group" id="zero-select-group">
         <button class="btn active" data-prof="A">零位 A</button>
@@ -122,11 +131,22 @@
     </div>
   </div>
 
-  <!-- 右侧：键盘控制 -->
+  <!-- 右侧：摄像头 + 键盘控制 -->
   <div class="right-col">
-    <div class="card controls">
+    <!-- 摄像头画面 -->
+    <div class="card camera-card">
+      <div class="cam-header">
+        <h2 style="margin-bottom:0;">实时摄像头画面</h2>
+        <span class="cam-status" id="cam-status">1080P 运行中</span>
+      </div>
+      <div class="camera-wrap">
+        <img id="cam-stream" src="http://192.168.50.1:8081/stream" alt="Camera Stream" onerror="this.style.display='none';document.getElementById('cam-status').textContent='摄像头断开';document.getElementById('cam-status').style.color='var(--danger)';">
+      </div>
+    </div>
+
+    <div class="card controls" style="margin-top: 15px;">
       <h2>键盘控制</h2>
-      <div class="focus-hint" id="focus-hint">点击此页面任意位置后，即可用键盘控制</div>
+      <div class="focus-hint" id="focus-hint">可直接点击按键，或用物理键盘控制</div>
 
       <div class="keyboard-panel" id="keyboard-panel" tabindex="0">
         <div class="key-grid">
@@ -141,15 +161,16 @@
             <div class="key-group"><div class="key" data-key="KeyD">D</div><div class="key-label">右转</div></div>
           </div>
           <div class="key-row">
-            <div class="key-group"><div class="key" data-key="ArrowLeft">←</div><div class="key-label">左倾 Roll</div></div>
-            <div class="key-group"><div class="key" data-key="ArrowUp">↑</div><div class="key-label">抬头 Pitch</div></div>
-            <div class="key-group"><div class="key" data-key="ArrowDown">↓</div><div class="key-label">低头 Pitch</div></div>
-            <div class="key-group"><div class="key" data-key="ArrowRight">→</div><div class="key-label">右倾 Roll</div></div>
+            <div class="key-group"><div class="key" data-key="ArrowLeft">&larr;</div><div class="key-label">左倾 Roll</div></div>
+            <div class="key-group"><div class="key" data-key="ArrowUp">&uarr;</div><div class="key-label">抬头 Pitch</div></div>
+            <div class="key-group"><div class="key" data-key="ArrowDown">&darr;</div><div class="key-label">低头 Pitch</div></div>
+            <div class="key-group"><div class="key" data-key="ArrowRight">&rarr;</div><div class="key-label">右倾 Roll</div></div>
           </div>
         </div>
         <div class="info-text" style="margin-top:14px">
-          按住按键持续控制，松开即停<br>
-          数字键 <b>1</b> 慢速 · <b>2</b> 中速 · <b>3</b> 快速 · <b>空格</b> 紧急停止
+          布局：1–6 升沉Z（前排1/6）| 7–8 水平前进/转向<br>
+          按住屏幕按键或键盘持续控制，松开即停<br>
+          数字键 <b>1</b> 慢速 &middot; <b>2</b> 中速 &middot; <b>3</b> 快速 &middot; <b>空格</b> 紧急停止
         </div>
       </div>
 
@@ -168,101 +189,105 @@
         </div>
       </div>
     </div>
+
     <!-- 独立电机控制 -->
-      <div class="card" style="margin-top: 15px;">
-        <h2>独立电机控制 <span style="font-size:0.8rem;color:var(--text-muted);font-weight:normal;margin-left:8px;" id="motor-mode-label">(已关闭)</span></h2>
-        <div style="margin-bottom:12px">
-          <button class="btn" id="btn-motor-toggle" style="background:var(--border);color:var(--text);width:100%;padding:10px;">启用独立电机控制</button>
+    <div class="card" style="margin-top: 15px;">
+      <h2>独立电机控制 <span style="font-size:0.8rem;color:var(--text-muted);font-weight:normal;margin-left:8px;" id="motor-mode-label">(已关闭)</span></h2>
+      <div style="margin-bottom:12px">
+        <button class="btn" id="btn-motor-toggle" style="background:var(--border);color:var(--text);width:100%;padding:10px;">启用独立电机控制</button>
+      </div>
+      <div id="motor-controls" style="display:none;">
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px;">
+
+          <div class="motor-item" style="background:rgba(56,189,248,0.1);border:1px solid var(--primary);border-radius:8px;padding:8px;text-align:center;">
+            <div style="font-size:0.75rem;color:var(--primary);margin-bottom:4px;">电机 1 <span style="font-size:0.65rem;color:var(--text-muted);">前左·升沉Z</span></div>
+            <input type="range" id="motor-0" min="-100" max="100" value="0" step="1" style="width:100%;accent-color:var(--primary);">
+            <div style="font-size:0.75rem;color:var(--text);margin-top:2px;" id="motor-val-0">0%</div>
+          </div>
+
+          <div class="motor-item" style="background:rgba(56,189,248,0.1);border:1px solid var(--primary);border-radius:8px;padding:8px;text-align:center;">
+            <div style="font-size:0.75rem;color:var(--primary);margin-bottom:4px;">电机 2 <span style="font-size:0.65rem;color:var(--text-muted);">中左·升沉Z</span></div>
+            <input type="range" id="motor-1" min="-100" max="100" value="0" step="1" style="width:100%;accent-color:var(--primary);">
+            <div style="font-size:0.75rem;color:var(--text);margin-top:2px;" id="motor-val-1">0%</div>
+          </div>
+
+          <div class="motor-item" style="background:rgba(34,197,94,0.1);border:1px solid var(--success);border-radius:8px;padding:8px;text-align:center;">
+            <div style="font-size:0.75rem;color:var(--success);margin-bottom:4px;">电机 3 <span style="font-size:0.65rem;color:var(--text-muted);">后左·升沉Z</span></div>
+            <input type="range" id="motor-2" min="-100" max="100" value="0" step="1" style="width:100%;accent-color:var(--success);">
+            <div style="font-size:0.75rem;color:var(--text);margin-top:2px;" id="motor-val-2">0%</div>
+          </div>
+
+          <div class="motor-item" style="background:rgba(34,197,94,0.1);border:1px solid var(--success);border-radius:8px;padding:8px;text-align:center;">
+            <div style="font-size:0.75rem;color:var(--success);margin-bottom:4px;">电机 4 <span style="font-size:0.65rem;color:var(--text-muted);">后右·升沉Z</span></div>
+            <input type="range" id="motor-3" min="-100" max="100" value="0" step="1" style="width:100%;accent-color:var(--success);">
+            <div style="font-size:0.75rem;color:var(--text);margin-top:2px;" id="motor-val-3">0%</div>
+          </div>
+
+          <div class="motor-item" style="background:rgba(239,68,68,0.1);border:1px solid var(--danger);border-radius:8px;padding:8px;text-align:center;">
+            <div style="font-size:0.75rem;color:var(--danger);margin-bottom:4px;">电机 5 <span style="font-size:0.65rem;color:var(--text-muted);">中右·升沉Z</span></div>
+            <input type="range" id="motor-4" min="-100" max="100" value="0" step="1" style="width:100%;accent-color:var(--danger);">
+            <div style="font-size:0.75rem;color:var(--text);margin-top:2px;" id="motor-val-4">0%</div>
+          </div>
+
+          <div class="motor-item" style="background:rgba(239,68,68,0.1);border:1px solid var(--danger);border-radius:8px;padding:8px;text-align:center;">
+            <div style="font-size:0.75rem;color:var(--danger);margin-bottom:4px;">电机 6 <span style="font-size:0.65rem;color:var(--text-muted);">前右·升沉Z</span></div>
+            <input type="range" id="motor-5" min="-100" max="100" value="0" step="1" style="width:100%;accent-color:var(--danger);">
+            <div style="font-size:0.75rem;color:var(--text);margin-top:2px;" id="motor-val-5">0%</div>
+          </div>
+
+          <div class="motor-item" style="background:rgba(250,204,21,0.1);border:1px solid #facc15;border-radius:8px;padding:8px;text-align:center;">
+            <div style="font-size:0.75rem;color:#facc15;margin-bottom:4px;">电机 7 <span style="font-size:0.65rem;color:var(--text-muted);">水平·右·前进/转向</span></div>
+            <input type="range" id="motor-6" min="-100" max="100" value="0" step="1" style="width:100%;accent-color:#facc15;">
+            <div style="font-size:0.75rem;color:var(--text);margin-top:2px;" id="motor-val-6">0%</div>
+          </div>
+
+          <div class="motor-item" style="background:rgba(250,204,21,0.1);border:1px solid #facc15;border-radius:8px;padding:8px;text-align:center;">
+            <div style="font-size:0.75rem;color:#facc15;margin-bottom:4px;">电机 8 <span style="font-size:0.65rem;color:var(--text-muted);">水平·左·前进/转向</span></div>
+            <input type="range" id="motor-7" min="-100" max="100" value="0" step="1" style="width:100%;accent-color:#facc15;">
+            <div style="font-size:0.75rem;color:var(--text);margin-top:2px;" id="motor-val-7">0%</div>
+          </div>
+
         </div>
-        <div id="motor-controls" style="display:none;">
-          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px;">
-            <!-- Motors 1,2: horizontal (left/right) -->
-            <div class="motor-item" style="background:rgba(56,189,248,0.1);border:1px solid var(--primary);border-radius:8px;padding:8px;text-align:center;">
-              <div style="font-size:0.75rem;color:var(--primary);margin-bottom:4px;">电机 1 <span style="font-size:0.65rem;color:var(--text-muted);">水平/左</span></div>
-              <input type="range" id="motor-0" min="-100" max="100" value="0" step="1" style="width:100%;accent-color:var(--primary);">
-              <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--text-muted);"><span>-100</span><span id="motor-val-0">0%</span><span>100</span></div>
-            </div>
-            <div class="motor-item" style="background:rgba(56,189,248,0.1);border:1px solid var(--primary);border-radius:8px;padding:8px;text-align:center;">
-              <div style="font-size:0.75rem;color:var(--primary);margin-bottom:4px;">电机 2 <span style="font-size:0.65rem;color:var(--text-muted);">水平/右</span></div>
-              <input type="range" id="motor-1" min="-100" max="100" value="0" step="1" style="width:100%;accent-color:var(--primary);">
-              <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--text-muted);"><span>-100</span><span id="motor-val-1">0%</span><span>100</span></div>
-            </div>
-            <!-- Motors 3-8: vertical (up/down) -->
-            <div class="motor-item" style="background:rgba(34,197,94,0.1);border:1px solid var(--success);border-radius:8px;padding:8px;text-align:center;">
-              <div style="font-size:0.75rem;color:var(--success);margin-bottom:4px;">电机 3 <span style="font-size:0.65rem;color:var(--text-muted);">垂直</span></div>
-              <input type="range" id="motor-2" min="-100" max="100" value="0" step="1" style="width:100%;accent-color:var(--success);">
-              <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--text-muted);"><span>-100</span><span id="motor-val-2">0%</span><span>100</span></div>
-            </div>
-            <div class="motor-item" style="background:rgba(34,197,94,0.1);border:1px solid var(--success);border-radius:8px;padding:8px;text-align:center;">
-              <div style="font-size:0.75rem;color:var(--success);margin-bottom:4px;">电机 4 <span style="font-size:0.65rem;color:var(--text-muted);">垂直</span></div>
-              <input type="range" id="motor-3" min="-100" max="100" value="0" step="1" style="width:100%;accent-color:var(--success);">
-              <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--text-muted);"><span>-100</span><span id="motor-val-3">0%</span><span>100</span></div>
-            </div>
-            <div class="motor-item" style="background:rgba(34,197,94,0.1);border:1px solid var(--success);border-radius:8px;padding:8px;text-align:center;">
-              <div style="font-size:0.75rem;color:var(--success);margin-bottom:4px;">电机 5 <span style="font-size:0.65rem;color:var(--text-muted);">垂直</span></div>
-              <input type="range" id="motor-4" min="-100" max="100" value="0" step="1" style="width:100%;accent-color:var(--success);">
-              <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--text-muted);"><span>-100</span><span id="motor-val-4">0%</span><span>100</span></div>
-            </div>
-            <div class="motor-item" style="background:rgba(34,197,94,0.1);border:1px solid var(--success);border-radius:8px;padding:8px;text-align:center;">
-              <div style="font-size:0.75rem;color:var(--success);margin-bottom:4px;">电机 6 <span style="font-size:0.65rem;color:var(--text-muted);">垂直</span></div>
-              <input type="range" id="motor-5" min="-100" max="100" value="0" step="1" style="width:100%;accent-color:var(--success);">
-              <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--text-muted);"><span>-100</span><span id="motor-val-5">0%</span><span>100</span></div>
-            </div>
-            <div class="motor-item" style="background:rgba(34,197,94,0.1);border:1px solid var(--success);border-radius:8px;padding:8px;text-align:center;">
-              <div style="font-size:0.75rem;color:var(--success);margin-bottom:4px;">电机 7 <span style="font-size:0.65rem;color:var(--text-muted);">垂直</span></div>
-              <input type="range" id="motor-6" min="-100" max="100" value="0" step="1" style="width:100%;accent-color:var(--success);">
-              <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--text-muted);"><span>-100</span><span id="motor-val-6">0%</span><span>100</span></div>
-            </div>
-            <div class="motor-item" style="background:rgba(34,197,94,0.1);border:1px solid var(--success);border-radius:8px;padding:8px;text-align:center;">
-              <div style="font-size:0.75rem;color:var(--success);margin-bottom:4px;">电机 8 <span style="font-size:0.65rem;color:var(--text-muted);">垂直</span></div>
-              <input type="range" id="motor-7" min="-100" max="100" value="0" step="1" style="width:100%;accent-color:var(--success);">
-              <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--text-muted);"><span>-100</span><span id="motor-val-7">0%</span><span>100</span></div>
-            </div>
-          </div>
-          <div style="margin-top:10px">
-            <button class="btn" id="btn-motor-stop" style="background:var(--danger);color:#fff;width:100%;padding:10px;">全部归零 STOP</button>
-          </div>
+        <div style="margin-top:12px;text-align:center;">
+          <button class="btn" id="btn-motor-stop" style="background:var(--danger);color:#fff;width:auto;padding:8px 24px;">全部归零</button>
         </div>
       </div>
+    </div>
   </div>
 </div>
 
-<script type="importmap">
-  {
-    "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
-    }
-  }
-</script>
-
 <script type="module">
-  import * as THREE from "three";
+  import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
 
   const statusDot = document.getElementById("status-dot");
   const statusText = document.getElementById("status-text");
-  
-  // THREE.JS
-  const canvas = document.getElementById("scene");
-  const wrap = document.getElementById("scene-wrap");
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-  renderer.setPixelRatio(window.devicePixelRatio);
-  renderer.setSize(wrap.clientWidth, wrap.clientHeight, false);
-  
-  const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(45, wrap.clientWidth / wrap.clientHeight, 0.1, 100);
-  camera.position.set(2.8, 2.2, 3.2);
-  camera.lookAt(0, 0, 0);
-  scene.add(new THREE.AmbientLight(0xffffff, 0.65));
-  const keyLight = new THREE.DirectionalLight(0xffffff, 1.1);
-  keyLight.position.set(4, 6, 5);
-  scene.add(keyLight);
-  const grid = new THREE.GridHelper(4, 20, 0x334155, 0x1e293b);
-  grid.position.y = -0.8;
-  scene.add(grid);
 
-  const robot = new THREE.Group();
+  const wrap = document.getElementById("scene-wrap");
+  const canvas = document.getElementById("scene");
+
   let smoothRoll = 0, smoothPitch = 0, smoothYaw = 0;
   const POSE_SMOOTH = 0.12;
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0f172a);
+  const camera = new THREE.PerspectiveCamera(45, wrap.clientWidth / wrap.clientHeight, 0.1, 100);
+  camera.position.set(2.5, 1.5, 2.5);
+  camera.lookAt(0, 0, 0);
+
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+  const ambLight = new THREE.AmbientLight(0x404060, 1.2);
+  scene.add(ambLight);
+  const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+  dirLight.position.set(5, 10, 5);
+  scene.add(dirLight);
+
+  const grid = new THREE.GridHelper(3, 20, 0x334155, 0x1e293b);
+  scene.add(grid);
+  scene.add(new THREE.AxesHelper(1.5));
+
+  const robot = new THREE.Group();
 
   const body = new THREE.Mesh(
     new THREE.BoxGeometry(1.4, 0.45, 0.9),
@@ -285,7 +310,7 @@
     renderer.setSize(w, h, false);
   }
   window.addEventListener("resize", resize);
-  
+
   function renderLoop() {
     requestAnimationFrame(renderLoop);
     const rollRad = THREE.MathUtils.degToRad(smoothRoll);
@@ -300,8 +325,11 @@
   const ids = ["roll", "pitch", "yaw"];
   const displayValues = { roll: 0, pitch: 0, yaw: 0 };
   let currentProfile = "A";
-  let ctrlState = { heave: 0, pitch: 0, roll: 0, surge: 0, yaw: 0, speed_mode: 'medium', control_mode: 'manual' };
-  
+  let ctrlState = { heave: 0, pitch: 0, roll: 0, surge: 0, yaw: 0, speed_mode: 'medium', control_mode: 'manual', holding: false };
+  let releaseBurstUntil = 0;
+  const CONTROL_HZ_MS = 25;      // 40Hz 前端上报
+  const RELEASE_BURST_MS = 150;  // 松键后短 burst，够覆盖 1~2 个后端周期
+
   const modeLabels = {
     manual: "手动控制",
     imu_hold: "IMU姿态保持",
@@ -328,7 +356,7 @@
       `模式: <b>${modeLabels[mode] || mode}</b><br>` +
       `PID输出 Roll=${(data.imu_cmd_roll||0).toFixed(3)} Pitch=${(data.imu_cmd_pitch||0).toFixed(3)} Yaw=${(data.imu_cmd_yaw||0).toFixed(3)}<br>` +
       `SPI: ${data.spi_active ? '已连接STM32' : '模拟(未接SPI)'}`;
-    
+
     currentProfile = data.active_zero_profile;
     document.querySelectorAll('#zero-select-group .btn').forEach(b => {
       b.classList.toggle('active', b.dataset.prof === currentProfile);
@@ -339,7 +367,7 @@
       displayValues[id] += (val - displayValues[id]) * 0.25;
       document.getElementById(id).textContent = val.toFixed(3);
     });
-    
+
     smoothRoll += (displayValues.roll - smoothRoll) * POSE_SMOOTH;
     smoothPitch += (displayValues.pitch - smoothPitch) * POSE_SMOOTH;
     smoothYaw += (displayValues.yaw - smoothYaw) * POSE_SMOOTH;
@@ -394,6 +422,10 @@
   const focusHint = document.getElementById("focus-hint");
   const ctrlDisplay = document.getElementById("ctrl-display");
   const KEY_STEP = 1.0;
+  const CONTROL_KEYS = new Set([
+    "KeyW","KeyA","KeyS","KeyD","KeyQ","KeyE",
+    "ArrowUp","ArrowDown","ArrowLeft","ArrowRight",
+  ]);
 
   function updateKeyHighlights() {
     document.querySelectorAll(".key[data-key]").forEach(el => {
@@ -419,17 +451,27 @@
     ctrlState.pitch = pitch;
     ctrlState.roll = roll;
     ctrlState.heave = heave;
+    ctrlState.holding = pressedKeys.size > 0;
 
     ctrlDisplay.textContent =
-      `Surge:${surge.toFixed(1)} Roll:${roll.toFixed(1)} Pitch:${pitch.toFixed(1)} Yaw:${yaw.toFixed(1)} Heave:${heave.toFixed(1)}`;
+      `Surge:${surge.toFixed(1)} Roll:${roll.toFixed(1)} Pitch:${pitch.toFixed(1)} Yaw:${yaw.toFixed(1)} Heave:${heave.toFixed(1)}` +
+      (ctrlState.holding ? ' [按住]' : ' [停止]');
     updateKeyHighlights();
+    sendControl(true);
+  }
+
+  function markReleased() {
+    if (pressedKeys.size === 0) {
+      releaseBurstUntil = Date.now() + RELEASE_BURST_MS;
+    }
   }
 
   function emergencyStop() {
     pressedKeys.clear();
     ctrlState.heave = ctrlState.pitch = ctrlState.roll = ctrlState.surge = ctrlState.yaw = 0;
+    ctrlState.holding = false;
+    releaseBurstUntil = Date.now() + RELEASE_BURST_MS;
     applyKeyboardToCtrl();
-    sendControl();
   }
 
   function onKeyDown(e) {
@@ -446,11 +488,7 @@
     if (e.key === "2") { setSpeedMode("medium"); return; }
     if (e.key === "3") { setSpeedMode("fast"); return; }
 
-    const controlKeys = new Set([
-      "KeyW","KeyA","KeyS","KeyD","KeyQ","KeyE",
-      "ArrowUp","ArrowDown","ArrowLeft","ArrowRight",
-    ]);
-    if (controlKeys.has(e.code)) {
+    if (CONTROL_KEYS.has(e.code)) {
       pressedKeys.add(e.code);
       applyKeyboardToCtrl();
     }
@@ -460,8 +498,44 @@
     if (pressedKeys.has(e.code)) {
       pressedKeys.delete(e.code);
       applyKeyboardToCtrl();
+      markReleased();
     }
   }
+
+  function pressControlKey(code) {
+    if (!CONTROL_KEYS.has(code)) return;
+    pressedKeys.add(code);
+    applyKeyboardToCtrl();
+  }
+
+  function releaseControlKey(code) {
+    if (!pressedKeys.has(code)) return;
+    pressedKeys.delete(code);
+    applyKeyboardToCtrl();
+  }
+
+  document.querySelectorAll(".key[data-key]").forEach(el => {
+    const code = el.dataset.key;
+    el.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      el.setPointerCapture(e.pointerId);
+      pressControlKey(code);
+    });
+    const release = (e) => {
+      if (el.hasPointerCapture(e.pointerId)) {
+        el.releasePointerCapture(e.pointerId);
+      }
+      releaseControlKey(code);
+      markReleased();
+    };
+    el.addEventListener("pointerup", release);
+    el.addEventListener("pointercancel", release);
+    el.addEventListener("lostpointercapture", () => {
+      releaseControlKey(code);
+      markReleased();
+    });
+  });
 
   function setSpeedMode(mode) {
     ctrlState.speed_mode = mode;
@@ -478,100 +552,108 @@
 
   keyPanel.addEventListener("click", () => keyPanel.focus());
   keyPanel.addEventListener("focus", () => {
-    focusHint.textContent = "键盘已就绪，可以控制";
+    focusHint.textContent = "键盘已就绪，可点击按键或继续用键盘";
     focusHint.classList.remove("warn");
   });
   keyPanel.addEventListener("blur", () => {
-    focusHint.textContent = "点击此区域后，即可用键盘控制";
+    focusHint.textContent = "可直接点击按键，或用物理键盘控制";
     focusHint.classList.add("warn");
-    emergencyStop();
   });
 
-  // Joystick & Control
-  function sendControl() {
+  let lastSentPayload = "";
+
+  function sendControl(force = false) {
+    const payload = JSON.stringify(ctrlState);
+    if (!force && payload === lastSentPayload) return;
+    lastSentPayload = payload;
     fetch('/api/control', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(ctrlState),
+      body: payload,
     }).catch(e => {});
   }
-  
-  // 25ms (40Hz) send loop
-  setInterval(sendControl, 25);
 
-  // Speed Mode buttons
+  function hasActiveControl() {
+    return pressedKeys.size > 0 || Date.now() < releaseBurstUntil;
+  }
+
+  // 按住/松键 40Hz 上报；后端收到后立即 SPI 下发
+  setInterval(() => {
+    if (hasActiveControl()) {
+      sendControl(true);
+    }
+  }, CONTROL_HZ_MS);
+
   document.querySelectorAll('.speed-btn').forEach(btn => {
     btn.addEventListener('click', () => setSpeedMode(btn.dataset.speed));
   });
 
   keyPanel.focus();
 
-// ===== 独立电机控制 =====
-let motorActive = false;
-const motorValues = [0,0,0,0,0,0,0,0];
-const motorSliders = [];
-const motorLabels = [];
-for (let i = 0; i < 8; i++) {
-  const slider = document.getElementById('motor-' + i);
-  const label = document.getElementById('motor-val-' + i);
-  if (slider && label) {
-    motorSliders.push(slider);
-    motorLabels.push(label);
-    slider.addEventListener('input', () => {
-      motorValues[i] = parseInt(slider.value);
-      label.textContent = motorValues[i] + '%';
-      if (motorActive) sendMotorControl();
-    });
+  // ===== 独立电机控制 =====
+  let motorActive = false;
+  const motorValues = [0,0,0,0,0,0,0,0];
+  const motorSliders = [];
+  const motorLabels = [];
+  for (let i = 0; i < 8; i++) {
+    const slider = document.getElementById('motor-' + i);
+    const label = document.getElementById('motor-val-' + i);
+    if (slider && label) {
+      motorSliders.push(slider);
+      motorLabels.push(label);
+      slider.addEventListener('input', () => {
+        motorValues[i] = parseInt(slider.value);
+        label.textContent = motorValues[i] + '%';
+        if (motorActive) sendMotorControl();
+      });
+    }
   }
-}
 
-function sendMotorControl() {
-  fetch('/api/motor/individual', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ active: motorActive, channels: motorValues }),
-  }).catch(e => {});
-}
+  function sendMotorControl() {
+    fetch('/api/motor/individual', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active: motorActive, channels: motorValues }),
+    }).catch(e => {});
+  }
 
-document.getElementById('btn-motor-toggle').addEventListener('click', () => {
-  motorActive = !motorActive;
-  const controls = document.getElementById('motor-controls');
-  const btn = document.getElementById('btn-motor-toggle');
-  const label = document.getElementById('motor-mode-label');
-  if (motorActive) {
-    controls.style.display = 'block';
-    btn.textContent = '关闭独立电机控制';
-    btn.style.background = 'var(--danger)';
-    btn.style.color = '#fff';
-    label.textContent = '(已启用 - 键盘/IMU控制已暂停)';
-    label.style.color = 'var(--danger)';
-    sendMotorControl();
-  } else {
-    controls.style.display = 'none';
-    btn.textContent = '启用独立电机控制';
-    btn.style.background = 'var(--border)';
-    btn.style.color = '';
-    label.textContent = '(已关闭)';
-    label.style.color = '';
-    // Reset all sliders
+  document.getElementById('btn-motor-toggle').addEventListener('click', () => {
+    motorActive = !motorActive;
+    const controls = document.getElementById('motor-controls');
+    const btn = document.getElementById('btn-motor-toggle');
+    const label = document.getElementById('motor-mode-label');
+    if (motorActive) {
+      controls.style.display = 'block';
+      btn.textContent = '关闭独立电机控制';
+      btn.style.background = 'var(--danger)';
+      btn.style.color = '#fff';
+      label.textContent = '(已启用 - 键盘/IMU控制已暂停)';
+      label.style.color = 'var(--danger)';
+      sendMotorControl();
+    } else {
+      controls.style.display = 'none';
+      btn.textContent = '启用独立电机控制';
+      btn.style.background = 'var(--border)';
+      btn.style.color = '';
+      label.textContent = '(已关闭)';
+      label.style.color = '';
+      for (let i = 0; i < 8; i++) {
+        motorValues[i] = 0;
+        motorSliders[i].value = 0;
+        motorLabels[i].textContent = '0%';
+      }
+      sendMotorControl();
+    }
+  });
+
+  document.getElementById('btn-motor-stop').addEventListener('click', () => {
     for (let i = 0; i < 8; i++) {
       motorValues[i] = 0;
       motorSliders[i].value = 0;
       motorLabels[i].textContent = '0%';
     }
-    sendMotorControl();
-  }
-});
-
-document.getElementById('btn-motor-stop').addEventListener('click', () => {
-  for (let i = 0; i < 8; i++) {
-    motorValues[i] = 0;
-    motorSliders[i].value = 0;
-    motorLabels[i].textContent = '0%';
-  }
-  if (motorActive) sendMotorControl();
-});
-
+    if (motorActive) sendMotorControl();
+  });
 </script>
 </body>
 </html>

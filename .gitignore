@@ -18,3 +18,7 @@ venv/
 
 # 旧版重复文件
 /imu_serial_node.c
+
+# 本地备份
+*.bak
+*.bak_*
