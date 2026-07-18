@@ -31,6 +31,11 @@
     .camera-card .cam-status { font-size: 0.8rem; color: var(--success); }
     .camera-wrap { width: 100%; border-radius: 8px; overflow: hidden; background: #000; line-height: 0; }
     .camera-wrap img { width: 100%; height: auto; display: block; }
+    .cam-actions { display: flex; gap: 8px; margin-bottom: 10px; }
+    .cam-actions .btn { flex: 1; }
+    .cam-actions .btn.start { background: var(--success); color: #000; }
+    .cam-actions .btn.stop { background: var(--danger); color: #fff; }
+    .cam-placeholder { color: var(--text-muted); font-size: 0.9rem; padding: 48px 12px; text-align: center; background: #000; }
 
     /* IMU Info */
     .metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px; }
@@ -137,10 +142,15 @@
     <div class="card camera-card">
       <div class="cam-header">
         <h2 style="margin-bottom:0;">实时摄像头画面</h2>
-        <span class="cam-status" id="cam-status">1080P 运行中</span>
+        <span class="cam-status" id="cam-status">未启动</span>
+      </div>
+      <div class="cam-actions">
+        <button type="button" class="btn start" id="cam-start-btn">启动摄像头</button>
+        <button type="button" class="btn stop" id="cam-stop-btn" disabled>关闭摄像头</button>
       </div>
       <div class="camera-wrap">
-        <img id="cam-stream" src="http://192.168.50.1:8081/stream" alt="Camera Stream" onerror="this.style.display='none';document.getElementById('cam-status').textContent='摄像头断开';document.getElementById('cam-status').style.color='var(--danger)';">
+        <div class="cam-placeholder" id="cam-placeholder">摄像头未启动（省电模式）。需要画面时再点「启动摄像头」。</div>
+        <img id="cam-stream" alt="Camera Stream" style="display:none;">
       </div>
     </div>
 
@@ -654,6 +664,83 @@
     }
     if (motorActive) sendMotorControl();
   });
+</script>
+<script>
+(function () {
+  const img = document.getElementById("cam-stream");
+  const st = document.getElementById("cam-status");
+  const ph = document.getElementById("cam-placeholder");
+  const btnStart = document.getElementById("cam-start-btn");
+  const btnStop = document.getElementById("cam-stop-btn");
+  if (!img || !btnStart || !btnStop) return;
+
+  function setUi(running, message) {
+    if (st) {
+      st.textContent = message || (running ? "运行中" : "未启动");
+      st.style.color = running ? "var(--success)" : "var(--text-muted)";
+    }
+    btnStart.disabled = !!running;
+    btnStop.disabled = !running;
+    if (running) {
+      if (ph) ph.style.display = "none";
+      img.style.display = "block";
+      img.src = "http://" + location.hostname + ":8081/stream?t=" + Date.now();
+      img.onerror = function () {
+        if (st) {
+          st.textContent = "拉流失败";
+          st.style.color = "var(--danger)";
+        }
+      };
+    } else {
+      img.removeAttribute("src");
+      img.style.display = "none";
+      if (ph) ph.style.display = "block";
+    }
+  }
+
+  async function api(path) {
+    const r = await fetch(path, { method: "POST" });
+    return r.json();
+  }
+
+  async function refreshStatus() {
+    try {
+      const r = await fetch("/api/camera/status");
+      const d = await r.json();
+      setUi(!!d.running, d.running ? "运行中" : "未启动");
+    } catch (e) {
+      setUi(false, "状态未知");
+    }
+  }
+
+  btnStart.addEventListener("click", async () => {
+    btnStart.disabled = true;
+    if (st) { st.textContent = "启动中..."; st.style.color = "var(--text-muted)"; }
+    try {
+      const d = await api("/api/camera/start");
+      if (!d.ok) {
+        setUi(false, d.message || "启动失败");
+        return;
+      }
+      setTimeout(() => setUi(true, d.message || "运行中"), 1200);
+    } catch (e) {
+      setUi(false, "启动失败");
+    }
+  });
+
+  btnStop.addEventListener("click", async () => {
+    btnStop.disabled = true;
+    if (st) { st.textContent = "关闭中..."; }
+    try {
+      const d = await api("/api/camera/stop");
+      setUi(false, d.message || "未启动");
+    } catch (e) {
+      setUi(false, "关闭失败");
+    }
+  });
+
+  refreshStatus();
+})();
 </script>
 </body>
 </html>

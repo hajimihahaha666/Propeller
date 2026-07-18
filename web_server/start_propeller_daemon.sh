@@ -73,17 +73,9 @@ log "启动网页服务 http://${PI_IP}:8080 ..."
 python3 "${WS}/web_server/imu_web_server.py" >> "${WEB_LOG}" 2>&1 &
 web_pid=$!
 
-# 摄像头 MJPEG 流（1080p，端口 8081，供网页 <img> 直接读取）
+# 摄像头不自启（供电不足以同时扛 WiFi+摄像头），由网页按钮手动启动
 cam_pid=""
-if [ -e /dev/video0 ] && [ -f "${CAM_SCRIPT}" ]; then
-    log "启动摄像头流 http://${PI_IP}:8081 ..."
-    pkill -f camera_stream.py 2>/dev/null || true
-    sleep 1
-    python3 -u "${CAM_SCRIPT}" >> "${CAM_LOG}" 2>&1 &
-    cam_pid=$!
-else
-    log "[WARN] /dev/video0 或 ${CAM_SCRIPT} 缺失，跳过摄像头"
-fi
+log "摄像头未自启，请在网页点击「启动摄像头」"
 
 sleep 3
 if curl -sf -m 5 "http://127.0.0.1:8080/api/status" >/dev/null; then
@@ -105,6 +97,6 @@ cleanup() {
 
 trap cleanup INT TERM
 
-# 任一关键进程退出即返回 -> systemd Restart=always 会整体拉起（含摄像头）
-wait -n ${imu_pid} ${web_pid} ${cam_pid} 2>/dev/null || wait "${web_pid}"
+# 只看守网页/IMU；摄像头由网页 API 管理，退出不拖垮整体服务
+wait -n ${imu_pid} ${web_pid} 2>/dev/null || wait "${web_pid}"
 cleanup

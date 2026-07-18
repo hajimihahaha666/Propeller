@@ -8,6 +8,12 @@
 
 电机 1–6：推力沿 URDF +Z，负责 heave / pitch / roll（上浮下潜与姿态）。
 电机 7–8：水平推进，负责 surge / yaw（前进后退与转向）。
+
+★ 每电机物理方向校正 MOTOR_SIGN（2026-07-18 实测）：
+   逐个 +12% 单独驱动实测——约定 +值应使 1-6 上浮、7-8 前进。
+   结果：左列竖直 1/2/3 与右侧水平 7 方向正确(+1)；
+         右列竖直 4/5/6 整排镜像装反、左侧水平 8 装反(−1)，需整体取反。
+   仅作用于混控输出；网页"独立电机"测试模式绕过混控、保持原始方向不受影响。
 """
 
 from __future__ import annotations
@@ -23,6 +29,9 @@ MOTOR_LABELS = (
     "8 水平·左",
 )
 
+# 每电机物理方向校正：+1 保持，−1 整体取反（该桨物理装反）。实测见模块 docstring。
+MOTOR_SIGN = (1, 1, 1, -1, -1, -1, 1, -1)
+
 
 def mix_thrusters(
     h: float,
@@ -32,7 +41,7 @@ def mix_thrusters(
     y: float,
     limit: float,
 ) -> list[int]:
-    """将归一化指令 (-1~1) 混控为 8 路电机百分比 (-limit~limit)。"""
+    """将归一化指令 (-1~1) 混控为 8 路电机百分比 (-limit~limit)，并按 MOTOR_SIGN 校正物理方向。"""
     raw = [
         h - p + r,  # 电机 1 前左 · Z
         h + r,      # 电机 2 中左 · Z
@@ -44,4 +53,7 @@ def mix_thrusters(
         s + y,      # 电机 8 水平（Y 正侧）
     ]
     lim = float(limit)
-    return [int(max(-lim, min(lim, v * lim))) for v in raw]
+    return [
+        int(max(-lim, min(lim, sgn * v * lim)))
+        for sgn, v in zip(MOTOR_SIGN, raw)
+    ]

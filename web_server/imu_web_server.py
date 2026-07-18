@@ -24,6 +24,69 @@ except ImportError:
     print("[WARN] spidev 未安装，SPI 推进器仅模拟输出（请: sudo apt install python3-spidev）")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+CAM_SCRIPT = Path("/home/hansing/camera_stream.py")
+CAM_LOG = Path("/tmp/cam.log")
+CAM_PORT = 8081
+_camera_proc: subprocess.Popen | None = None
+_camera_lock = threading.Lock()
+
+
+def _camera_running() -> bool:
+    with _camera_lock:
+        return _camera_proc is not None and _camera_proc.poll() is None
+
+
+def _camera_status() -> dict:
+    return {
+        "ok": True,
+        "running": _camera_running(),
+        "port": CAM_PORT,
+        "script_exists": CAM_SCRIPT.is_file(),
+        "device_exists": Path("/dev/video0").exists(),
+    }
+
+
+def start_camera() -> dict:
+    global _camera_proc
+    with _camera_lock:
+        if _camera_proc is not None and _camera_proc.poll() is None:
+            return {"ok": True, "running": True, "message": "摄像头已在运行"}
+        if not CAM_SCRIPT.is_file():
+            return {"ok": False, "running": False, "message": f"缺少脚本: {CAM_SCRIPT}"}
+        if not Path("/dev/video0").exists():
+            return {"ok": False, "running": False, "message": "未找到 /dev/video0"}
+        subprocess.run(["pkill", "-f", "camera_stream.py"], capture_output=True)
+        time.sleep(0.4)
+        logf = open(CAM_LOG, "a", encoding="utf-8")
+        _camera_proc = subprocess.Popen(
+            ["python3", "-u", str(CAM_SCRIPT)],
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        print(f"[CAM] 已启动 pid={_camera_proc.pid}")
+        return {"ok": True, "running": True, "message": "摄像头已启动", "pid": _camera_proc.pid}
+
+
+def stop_camera() -> dict:
+    global _camera_proc
+    with _camera_lock:
+        if _camera_proc is not None and _camera_proc.poll() is None:
+            try:
+                _camera_proc.terminate()
+                _camera_proc.wait(timeout=3)
+            except Exception:
+                try:
+                    _camera_proc.kill()
+                except Exception:
+                    pass
+        _camera_proc = None
+        subprocess.run(["pkill", "-f", "camera_stream.py"], capture_output=True)
+        subprocess.run(["pkill", "-f", "ffmpeg.*video0"], capture_output=True)
+        print("[CAM] 已停止")
+        return {"ok": True, "running": False, "message": "摄像头已关闭"}
+
+
 ZERO_PROFILES_FILE = Path(__file__).resolve().parent / "zero_profiles.json"
 IMU_TCP_HOST = "127.0.0.1"
 IMU_TCP_PORT = 8888
@@ -549,6 +612,10 @@ class ImuWebHandler(BaseHTTPRequestHandler):
                 self._send_json(dict(state))
             return
 
+        if path == "/api/camera/status":
+            self._send_json(_camera_status())
+            return
+
         if path == "/":
             self._send_file(STATIC_DIR / "index.html")
             return
@@ -664,6 +731,14 @@ class ImuWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "message": f"已切换零位 {profile}"})
                 return
             self.send_error(400, "Bad Request")
+            return
+
+        if path == "/api/camera/start":
+            self._send_json(start_camera())
+            return
+
+        if path == "/api/camera/stop":
+            self._send_json(stop_camera())
             return
 
         if path == "/api/motor/individual":
