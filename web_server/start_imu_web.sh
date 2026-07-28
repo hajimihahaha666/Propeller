@@ -3,7 +3,7 @@
 
 set -e
 
-WS="/home/hansing/imu_ws"
+WS="/home/han/imu_ws"
 
 source /opt/ros/jazzy/setup.bash
 source "${WS}/install/setup.bash"

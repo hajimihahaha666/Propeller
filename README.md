@@ -38,7 +38,7 @@ imu_ws/
 ## 快速启动
 
 ```bash
-/home/hansing/imu_ws/web_server/start_imu_web.sh
+/home/han/imu_ws/web_server/start_imu_web.sh
 ```
 
 浏览器打开：`http://<树莓派IP>:8080`

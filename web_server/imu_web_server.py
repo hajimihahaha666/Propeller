@@ -24,7 +24,7 @@ except ImportError:
     print("[WARN] spidev 未安装，SPI 推进器仅模拟输出（请: sudo apt install python3-spidev）")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-CAM_SCRIPT = Path("/home/hansing/camera_stream.py")
+CAM_SCRIPT = Path("/home/han/camera_stream.py")
 CAM_LOG = Path("/tmp/cam.log")
 CAM_PORT = 8081
 _camera_proc: subprocess.Popen | None = None

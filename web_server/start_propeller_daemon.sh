@@ -3,12 +3,12 @@
 
 set -eo pipefail
 
-WS="/home/hansing/imu_ws"
+WS="/home/han/imu_ws"
 LOG_DIR="/tmp"
 IMU_LOG="${LOG_DIR}/imu_serial.log"
 WEB_LOG="${LOG_DIR}/imu_web.log"
 CAM_LOG="${LOG_DIR}/cam.log"
-CAM_SCRIPT="/home/hansing/camera_stream.py"
+CAM_SCRIPT="/home/han/camera_stream.py"
 PI_IP="192.168.50.1"
 
 log() {

@@ -1,7 +1,7 @@
 #!/bin/bash
 # 绕过网页，直接测试：1-6 升沉Z，7-8 前进/转向
 set -euo pipefail
-SCRIPT="/home/hansing/imu_ws/web_server/spi_send_burst.py"
+SCRIPT="/home/han/imu_ws/web_server/spi_send_burst.py"
 
 echo "=== 1) 中位解锁 3 秒 ==="
 for _ in $(seq 1 15); do
