@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import math
 import mimetypes
+import signal
 import socket
 import subprocess
 import threading
@@ -16,6 +16,10 @@ from pathlib import Path
 
 from imu_controller import ImuThrusterController, wrap_angle_deg
 from thruster_mixer import mix_thrusters
+
+# SPI 参数与总线锁的唯一来源见 esc_spi；固件约束见 docs/STM32固件SPI约束.md
+from esc_spi import FRAME_GAP_SEC as SPI_FRAME_GAP_SEC
+from esc_spi import SPI_SPEED_HZ, spi_bus_lock
 
 try:
     from esc_spi import ESC_SPI
@@ -199,25 +203,13 @@ spi_err_count = 0
 last_spi_channels = [0] * 8
 last_pushed_channels: list[int] | None = None
 last_spi_send_time = 0.0
-SPI_SPEED_HZ = 200_000
-SPI_FRAME_GAP_SEC = 0.001
 CONTROL_LOOP_SEC = 0.025  # 40Hz
 IDLE_KEEPALIVE_SEC = 1.0
-spi_lock = threading.Lock()  # 进程内串行
 
-# 跨进程 SPI 总线锁：与 spi_send_burst.py 用同一把文件锁，保证守护进程与任何
-# 测试脚本永不同时占用 /dev/spidev0.0。总线争用会让 STM32 收到交错帧、校验失败，
-# 固件每累计 200 次失败自动切一次 SPI 模式 → 与 Pi 固定 mode 0 永久错位、无法自愈。
-SPI_LOCK_FILE = Path("/tmp/propeller_spi.lock")
-_spi_lock_fh = None
-
-
-def _spi_bus_lock():
-    global _spi_lock_fh
-    if _spi_lock_fh is None:
-        SPI_LOCK_FILE.touch(exist_ok=True)
-        _spi_lock_fh = SPI_LOCK_FILE.open("w")
-    return _spi_lock_fh
+# SPI 总线互斥统一用 esc_spi.spi_bus_lock()：它同时做进程内串行与跨进程文件锁
+# (/tmp/propeller_spi.lock)，与 spi_send_burst.py、esc_spi 的 TUI 共用同一把。
+# 总线争用会让 STM32 收到交错帧、校验失败，固件每累计 200 次失败自动切一次 SPI
+# 模式 → 与 Pi 固定 mode 0 永久错位、无法自愈。
 
 
 # 逻辑通道 -> 物理通道 的置换：物理[i] = 逻辑[CHANNEL_WIRING[i]]。
@@ -294,9 +286,7 @@ def spi_push_channels(channels: list[int], *, burst: int = 1) -> None:
     last_spi_channels = list(channels)          # 显示用：逻辑通道（重映射前）
     phys_channels = apply_wiring(channels)      # 实际下发：物理通道（重映射后）
     ok = False
-    with spi_lock:
-        lockf = _spi_bus_lock()
-        fcntl.flock(lockf, fcntl.LOCK_EX)       # 跨进程独占总线
+    with spi_bus_lock():                        # 进程内串行 + 跨进程独占总线
         try:
             esc = spi_get()
             if esc is None:
@@ -316,8 +306,6 @@ def spi_push_channels(channels: list[int], *, burst: int = 1) -> None:
             spi_close()
             if spi_err_count <= 5 or spi_err_count % 50 == 0:
                 print(f"[ERROR] SPI 发送失败 #{spi_err_count}: {exc}")
-        finally:
-            fcntl.flock(lockf, fcntl.LOCK_UN)
     with state_lock:
         state["spi_tx_count"] = spi_tx_count
         state["spi_err_count"] = spi_err_count
@@ -790,9 +778,44 @@ def get_local_ip() -> str:
         return ETH_DIRECT_IP
 
 
+_shutdown_once = threading.Event()
+
+
+def stop_thrusters_and_close(reason: str = "") -> None:
+    """停机兜底：把 8 路推进器收回中位，然后关闭 SPI。
+
+    ★ 必须做，因为 STM32 侧没有失控保护：固件的 ESC_TimeoutHandler() 从未被调用
+      （App.c 里 Millisecond_Task / Millisecond_50_Task 都是空的），Pi 一旦停发，
+      最后一次油门会被 PWM 永久保持下去，电机不会自己停。
+    """
+    if _shutdown_once.is_set():
+        return
+    _shutdown_once.set()
+    try:
+        print(f"[INFO] 停机兜底：下发中位停机帧 {reason}".rstrip(), flush=True)
+        spi_push_channels([0] * 8, burst=5)
+    except Exception as exc:  # 兜底路径不允许再抛出
+        print(f"[ERROR] 停机兜底发送失败: {exc}", flush=True)
+    finally:
+        spi_close()
+
+
+def _handle_stop_signal(signum, _frame):
+    """SIGTERM/SIGINT：抛 SystemExit 让主线程走 main() 的 finally 兜底。
+
+    守护脚本 stop 时发的是 SIGTERM，Python 默认会直接终止、finally 不执行 ——
+    那样电机会保持最后油门继续转，所以这里必须显式接管。
+    """
+    print(f"\n[INFO] 收到 {signal.Signals(signum).name}，准备停机", flush=True)
+    raise SystemExit(0)
+
+
 def main() -> None:
     if not STATIC_DIR.is_dir():
         raise SystemExit(f"缺少网页目录: {STATIC_DIR}")
+
+    signal.signal(signal.SIGTERM, _handle_stop_signal)
+    signal.signal(signal.SIGINT, _handle_stop_signal)
 
     threading.Thread(target=imu_reader_loop, daemon=True).start()
     threading.Thread(target=arm_escs_at_boot, daemon=True).start()
@@ -810,12 +833,11 @@ def main() -> None:
 
     try:
         server.serve_forever()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         print("\n[INFO] 服务已停止")
     finally:
         server.server_close()
-        spi_push_channels([0] * 8, burst=3)
-        spi_close()
+        stop_thrusters_and_close("(服务退出)")
 
 
 if __name__ == "__main__":

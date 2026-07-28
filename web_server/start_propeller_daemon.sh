@@ -88,7 +88,18 @@ cleanup() {
     log "停止 propeller 服务..."
     [ -n "${imu_pid}" ] && kill "${imu_pid}" 2>/dev/null || true
     [ -n "${cam_pid}" ] && kill "${cam_pid}" 2>/dev/null || true
+
+    # 先给网页服务 SIGTERM，并等它把「中位停机帧」发完再走。
+    # STM32 侧没有失控保护（固件 ESC_TimeoutHandler 从未被调用），Pi 停发后电机
+    # 会保持最后油门一直转；而本脚本一 exit，systemd(KillMode=mixed) 就会 SIGKILL
+    # 掉残留进程，兜底帧就发不出去了。所以这里必须等。
     kill "${web_pid}" 2>/dev/null || true
+    for _ in $(seq 1 30); do          # 最多等 3s（service TimeoutStopSec=15）
+        kill -0 "${web_pid}" 2>/dev/null || break
+        sleep 0.1
+    done
+    kill -0 "${web_pid}" 2>/dev/null && log "[WARN] 网页服务未在 3s 内退出，强制结束"
+
     pkill -f imu_serial_node 2>/dev/null || true
     pkill -f imu_web_server.py 2>/dev/null || true
     pkill -f camera_stream.py 2>/dev/null || true
