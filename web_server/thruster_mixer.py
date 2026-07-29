@@ -52,8 +52,13 @@ def mix_thrusters(
     limit: float,
 ) -> list[int]:
     """将归一化指令 (-1~1) 混控为 8 路电机百分比 (-limit~limit)，并按 MOTOR_SIGN 校正物理方向。"""
-    # 分配规则（几何含义与旧版完全一致，只是搬到现在处在该位置的电机上）：
-    #   前排 −p / 中排 0 / 后排 +p ；左列 +r / 右列 −r ；水平左 s+y / 水平右 s−y
+    # 分配规则，由机体右手系 X前/Y左/Z上 的力矩 M = r×F = (y·F, −x·F, 0) 推出：
+    #   roll  绕+X: Mx=+y·F   → r>0 需左列正、右列负      → 左列 +r / 右列 −r
+    #   pitch 绕+Y: My=−x·F   → p>0 需后排正、前排负      → 前排 −p / 中排 0 / 后排 +p
+    #   yaw   绕+Z: 左侧前推给出 Mz<0(右转)               → y>0(左转) 需左侧后推、右侧前推
+    #                                                     → 水平左 s−y / 水平右 s+y
+    # 与 UI 约定一致（index.html: A=yaw+ 左转、E=heave+ 上浮、W=surge+ 前进）；
+    # 也与 imu_controller 的 PID 一致（out=pid(target−measured)，故 r>0 必须使实测 roll 增大）。
     raw = [
         h + p - r,  # 电机 1 后右 · Z
         h - r,      # 电机 2 中右 · Z
@@ -61,8 +66,8 @@ def mix_thrusters(
         h - p + r,  # 电机 4 前左 · Z
         h + r,      # 电机 5 中左 · Z
         h + p + r,  # 电机 6 后左 · Z
-        s + y,      # 电机 7 水平·左
-        s - y,      # 电机 8 水平·右
+        s - y,      # 电机 7 水平·左
+        s + y,      # 电机 8 水平·右
     ]
     lim = float(limit)
     return [
