@@ -203,6 +203,10 @@
     <!-- 独立电机控制 -->
     <div class="card" style="margin-top: 15px;">
       <h2>独立电机控制 <span style="font-size:0.8rem;color:var(--text-muted);font-weight:normal;margin-left:8px;" id="motor-mode-label">(已关闭)</span></h2>
+      <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:8px;line-height:1.5;">
+        正值 = <b>电机 1-6 上浮</b> / <b>电机 7-8 前进</b>（已按各桨实际装反方向自动校正，不用记哪台是反的）。<br>
+        位置标注为机身自身视角。此模式绕过混控与 IMU，直接单路驱动。
+      </div>
       <div style="margin-bottom:12px">
         <button class="btn" id="btn-motor-toggle" style="background:var(--border);color:var(--text);width:100%;padding:10px;">启用独立电机控制</button>
       </div>

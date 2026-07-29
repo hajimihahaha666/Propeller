@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from imu_controller import ImuThrusterController, wrap_angle_deg
-from thruster_mixer import mix_thrusters
+from thruster_mixer import MOTOR_SIGN, mix_thrusters
 
 # SPI 参数与总线锁的唯一来源见 esc_spi；固件约束见 docs/STM32固件SPI约束.md
 from esc_spi import FRAME_GAP_SEC as SPI_FRAME_GAP_SEC
@@ -271,7 +271,15 @@ def compute_channels_now() -> list[int]:
     speed_limits = {"slow": 25.0, "medium": 50.0, "fast": 80.0}
     with individual_motor_lock:
         if individual_motor_active:
-            return [int(clamp(v, -100, 100)) for v in individual_motor_values]
+            # 独立电机模式也套 MOTOR_SIGN：滑块正值统一表示「1-6 上浮 / 7-8 前进」，
+            # 由 MOTOR_SIGN 抵消各桨的物理装反，操作者不用记哪台是反的。
+            # ⚠ 因此本模式**不能再用来测量** MOTOR_SIGN（它已经把方向纠正掉了）；
+            #   现在它是**验证**工具：八路都给正值，应当全部上浮/前进，
+            #   哪一路不是，就是那一路的 MOTOR_SIGN 记错了。
+            return [
+                int(clamp(sgn * v, -100, 100))
+                for sgn, v in zip(MOTOR_SIGN, individual_motor_values)
+            ]
     with manual_lock:
         limit = speed_limits.get(manual_cmd["speed_mode"], 50.0)
     h, p, r, s, y = compute_thruster_commands()
