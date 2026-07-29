@@ -19,7 +19,7 @@ from thruster_mixer import MOTOR_SIGN, mix_thrusters
 
 # SPI 参数与总线锁的唯一来源见 esc_spi；固件约束见 docs/STM32固件SPI约束.md
 from esc_spi import FRAME_GAP_SEC as SPI_FRAME_GAP_SEC
-from esc_spi import SPI_SPEED_HZ, spi_bus_lock
+from esc_spi import MOTOR_TRIM_US, SPI_SPEED_HZ, percent_to_us, spi_bus_lock
 
 try:
     from esc_spi import ESC_SPI
@@ -291,15 +291,19 @@ def spi_push_channels(channels: list[int], *, burst: int = 1) -> None:
     global spi_tx_count, spi_err_count, last_spi_channels, last_spi_send_time, last_pushed_channels
     if ESC_SPI is None:
         return
-    last_spi_channels = list(channels)          # 显示用：逻辑通道（重映射前）
-    phys_channels = apply_wiring(channels)      # 实际下发：物理通道（重映射后）
+    last_spi_channels = list(channels)          # 显示用：逻辑通道百分比（重映射前）
+    phys_channels = apply_wiring(channels)      # 物理通道顺序（重映射后）
+    # 换算成直接微秒并叠加每路中位微调。电调真实中位不在 1500µs，不校的话"油门 0"
+    # 就是一点点正油门、桨会持续爬行（2026-07-29 电机 7/8 实测如此）。
+    # 集中放在这里，是因为开机解锁、控制环、SIGTERM 停机三条路径都走 spi_push_channels。
+    phys_us = [percent_to_us(v, MOTOR_TRIM_US[i]) for i, v in enumerate(phys_channels)]
     ok = False
     with spi_bus_lock():                        # 进程内串行 + 跨进程独占总线
         try:
             esc = spi_get()
             if esc is None:
                 return
-            esc.set_all(phys_channels)
+            esc.set_all(phys_us)
             for _ in range(max(1, burst)):
                 esc.send_frame()
                 if burst > 1:
